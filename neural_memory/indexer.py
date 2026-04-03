@@ -171,6 +171,17 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
     # Phase 2: Resolve cross-file edges
     all_edges = resolve_edges(all_nodes, all_edges)
 
+    # Phase 2.5: ORM schema detection
+    try:
+        from .db.orm_detector import detect_orm_models
+        db_nodes, db_edges = detect_orm_models(all_nodes)
+        for node in db_nodes:
+            all_nodes[node.id] = node
+        all_edges.extend(db_edges)
+        stats["db_tables_detected"] = len([n for n in db_nodes if n.node_type.value == "table"])
+    except Exception as e:
+        stats["errors"].append(f"orm_detector: {e}")
+
     # Phase 3: Redact sensitive content
     for node in all_nodes.values():
         if node.raw_code:

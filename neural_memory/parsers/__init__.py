@@ -46,6 +46,12 @@ try:
 except Exception:
     pass
 
+try:
+    from .languages.sql import SQLParser
+    register_parser(SQLParser())
+except Exception:
+    pass
+
 __all__ = ["register_parser", "get_parser", "get_all_supported_extensions"]
 
 from .registry import get_parser, get_all_supported_extensions

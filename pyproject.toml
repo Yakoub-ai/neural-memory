@@ -46,8 +46,12 @@ viz = [
     "numpy>=1.24.0",
     "plotly>=5.15.0",
 ]
+db = [
+    "psycopg2-binary>=2.9",
+    "pymysql>=1.1",
+]
 all = [
-    "neural-memory-mcp[vectors,viz]",
+    "neural-memory-mcp[vectors,viz,db]",
 ]
 test = [
     "pytest>=8.0",

@@ -45,6 +45,7 @@ class NeuralConfig:
         "**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs",
         "**/*.go",
         "**/*.rs",
+        "**/*.sql", "**/*.prisma",
     ])
     exclude_patterns: list[str] = field(default_factory=lambda: [
         "**/__pycache__/**", "**/node_modules/**", "**/.venv/**",

@@ -20,6 +20,7 @@ from .storage import Storage
 _SOURCE_EXTENSIONS = frozenset([
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
     ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".rb",
+    ".sql", ".prisma",
 ])
 
 

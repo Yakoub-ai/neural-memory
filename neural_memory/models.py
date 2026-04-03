@@ -28,6 +28,10 @@ class NodeType(str, Enum):
     PHASE = "phase"
     TASK = "task"
     SUBTASK = "subtask"
+    # ── Database schema ──
+    DATABASE = "database"
+    TABLE = "table"
+    COLUMN = "column"
 
 
 class EdgeType(str, Enum):
@@ -44,6 +48,7 @@ class EdgeType(str, Enum):
     # ── Task hierarchy ──
     PHASE_CONTAINS = "phase_contains"   # phase → task
     TASK_CONTAINS = "task_contains"     # task → subtask
+    REFERENCES = "references"          # FK relationship between tables
 
 
 class SummaryMode(str, Enum):

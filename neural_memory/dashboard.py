@@ -336,6 +336,7 @@ function startApp() {
     if (cat === 'bugs') return '#f85149';
     if (cat === 'tasks') return '#3fb950';
     if (cat === 'codebase') return '#58a6ff';
+    if (cat === 'database') return '#d2a8ff';
     return '#8b949e';
   }
 
@@ -354,7 +355,10 @@ function startApp() {
     bug:                ['#f85149',  84, 32],
     phase:              ['#3fb950', 100, 36],
     task:               ['#3fb950',  84, 30],
-    subtask:            ['#56d364',  72, 26]
+    subtask:            ['#56d364',  72, 26],
+    database:           ['#d2a8ff', 110, 38],
+    table:              ['#b28cf5',  90, 32],
+    column:             ['#9c6fe0',  72, 26]
   };
 
   var EDGE_STYLE = {
@@ -508,13 +512,58 @@ function startApp() {
       content.appendChild(diagBlock);
     }
 
+    // Connected nodes — "Neurals to"
+    var connected = [];
+    var seen = {};
+    RAW.edges.forEach(function(e) {
+      if (e.source_id === n.id && !seen[e.target_id]) {
+        seen[e.target_id] = true;
+        var t = RAW.nodes.find(function(x) { return x.id === e.target_id; });
+        if (t) connected.push({ node: t, type: e.edge_type, dir: 'out' });
+      }
+      if (e.target_id === n.id && !seen[e.source_id]) {
+        seen[e.source_id] = true;
+        var s = RAW.nodes.find(function(x) { return x.id === e.source_id; });
+        if (s) connected.push({ node: s, type: e.edge_type, dir: 'in' });
+      }
+    });
+    if (connected.length) {
+      var MAX_CONN = 25;
+      var shown = connected.slice(0, MAX_CONN);
+      var rest = connected.length - MAX_CONN;
+      var connBlock = mk('div', {class:'d-field'});
+      connBlock.appendChild(mk('div', {class:'d-label'}, ['Neurals to (' + connected.length + ')']));
+      shown.forEach(function(c) {
+        var cColor = nodeColor(c.node);
+        var arrow = c.dir === 'out' ? '\u2192' : '\u2190';
+        var link = mk('div', {style:'cursor:pointer;padding:4px 0;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:6px'});
+        link.appendChild(mk('span', {style:'color:#8b949e;font-size:10px;flex-shrink:0'}, [arrow + '\u00a0' + c.type]));
+        link.appendChild(mk('span', {style:'color:'+cColor+';font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'}, [c.node.name]));
+        link.addEventListener('click', function() {
+          showDetail(c.node);
+          if (state.tab === 'graph' && charts['graph']) {
+            charts['graph'].dispatchAction({ type: 'highlight', seriesIndex: 0, name: c.node.name });
+          }
+        });
+        link.addEventListener('mouseenter', function() { link.style.background = '#21262d'; });
+        link.addEventListener('mouseleave', function() { link.style.background = ''; });
+        connBlock.appendChild(link);
+      });
+      if (rest > 0) {
+        connBlock.appendChild(mk('div', {style:'color:#8b949e;font-size:11px;margin-top:4px'}, ['+' + rest + ' more']));
+      }
+      content.appendChild(connBlock);
+    }
+
     panel.classList.add('open');
     setTimeout(function() {
-      Object.keys(charts).forEach(function(id) { if (charts[id]) charts[id].resize(); });
-    }, 280);
+      var ac = charts[state.tab]; if (ac) ac.resize();
+    }, 320);
   }
 
   // ── Hierarchy treemap ──────────────────────────────────────────────────────
+
+  var _treemapZoom = 1;  // cumulative zoom for label sizing
 
   function filterHierarchy(node) {
     var visible = {};
@@ -552,6 +601,7 @@ function startApp() {
   function drawHierarchy() {
     var chart = getChart('hierarchy');
     if (!chart) return;
+    _treemapZoom = 1;
 
     var filtered = filterHierarchy(RAW.hierarchy);
     var data = [colorizeTree(filtered)];
@@ -572,7 +622,8 @@ function startApp() {
         data: data,
         visibleMin: 0,
         leafDepth: state.depth,
-        roam: false,
+        roam: true,
+        scaleLimit: { min: 0.5, max: 5 },
         breadcrumb: {
           show: true,
           bottom: 10,
@@ -625,6 +676,18 @@ function startApp() {
       if (!params.data || !params.data.id) return;
       var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
       if (n) showDetail(n);
+    });
+
+    // Zoom-responsive font sizing via mousewheel tracking
+    chart.getZr().off('mousewheel');
+    var _tmTimer = null;
+    chart.getZr().on('mousewheel', function(e) {
+      _treemapZoom = Math.max(0.5, Math.min(5, _treemapZoom * (e.wheelDelta > 0 ? 1.1 : 1 / 1.1)));
+      clearTimeout(_tmTimer);
+      _tmTimer = setTimeout(function() {
+        var fs = Math.min(24, Math.max(9, Math.round(11 * _treemapZoom)));
+        chart.setOption({ series: [{ label: { fontSize: fs }, upperLabel: { fontSize: fs } }] }, false);
+      }, 80);
     });
   }
 
@@ -733,6 +796,8 @@ function startApp() {
         data: [treeRoot],
         layout: 'radial',
         roam: true,
+        zoom: 0.85,
+        animationEasingUpdate: 'cubicOut',
         // Per-node symbolSize is set in the data items above;
         // series-level is a fallback for nodes without it.
         symbolSize: function(val, params) {
@@ -802,14 +867,16 @@ function startApp() {
   // ── Force-directed graph ───────────────────────────────────────────────────
 
   var _graphNodes = [];  // snapshot for 2-hop focus
+  var _graphZoom = 1;    // cumulative zoom factor for label scaling
 
-  function buildGraphNodes(nodes) {
+  function buildGraphNodes(nodes, zoom) {
+    zoom = zoom || 1;
     return nodes.map(function(n) {
       var color = nodeColor(n);
       var catIdx = CATEGORY_LIST.indexOf(n.node_type);
       var w = nodeW(n);
-      // ~7px per char at fontSize 10 with 6px padding each side
-      var maxChars = Math.max(4, Math.floor((w - 12) / 7));
+      // ~7px per char at fontSize 10; scale with zoom so more chars show when zoomed in
+      var maxChars = Math.max(4, Math.floor((w * Math.max(zoom, 1) - 12) / 7));
       var label = n.name.length > maxChars ? n.name.slice(0, maxChars - 1) + '\u2026' : n.name;
       return {
         id: n.id,
@@ -829,7 +896,7 @@ function startApp() {
         label: {
           show: true,
           formatter: label,
-          fontSize: 10,
+          fontSize: Math.min(28, Math.max(8, Math.round(10 * zoom))),
           color: '#e6edf3',
           position: 'inside',
           overflow: 'truncate',
@@ -871,6 +938,7 @@ function startApp() {
   function drawGraph() {
     var chart = getChart('graph');
     if (!chart) return;
+    _graphZoom = 1;
 
     var nodes = visibleNodes();
     _graphNodes = nodes;
@@ -913,6 +981,8 @@ function startApp() {
         draggable: true,
         animation: true,
         animationDuration: 800,
+        animationDurationUpdate: 300,
+        animationEasingUpdate: 'cubicOut',
         force: (function() {
           var nc = gNodes.length;
           var repBase = Math.max(250, 150 + nc * 3);
@@ -943,6 +1013,7 @@ function startApp() {
 
     chart.off('click');
     chart.off('dblclick');
+    chart.off('graphroam');
 
     chart.on('click', function(params) {
       if (params.dataType !== 'node') return;
@@ -959,6 +1030,18 @@ function startApp() {
     // Reset 2-hop focus on background double-click
     chart.getZr().on('dblclick', function(evt) {
       if (!evt.target) drawGraph();
+    });
+
+    // Zoom-responsive label sizing: scale font and maxChars with cumulative zoom
+    var _zoomTimer = null;
+    chart.on('graphroam', function(params) {
+      if (!params.zoom) return; // pan event, not zoom
+      _graphZoom = Math.max(0.3, Math.min(6, _graphZoom * params.zoom));
+      clearTimeout(_zoomTimer);
+      _zoomTimer = setTimeout(function() {
+        var updated = buildGraphNodes(nodes, _graphZoom);
+        chart.setOption({ series: [{ data: updated }] }, false);
+      }, 80);
     });
   }
 
@@ -1107,8 +1190,8 @@ function startApp() {
     document.getElementById('close-detail').addEventListener('click', function() {
       document.getElementById('detail-panel').classList.remove('open');
       setTimeout(function() {
-        Object.keys(charts).forEach(function(id) { if (charts[id]) charts[id].resize(); });
-      }, 280);
+        var ac = charts[state.tab]; if (ac) ac.resize();
+      }, 320);
     });
 
     // Tabs

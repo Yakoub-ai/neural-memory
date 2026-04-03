@@ -769,6 +769,93 @@ async def neural_add_task(params: AddTaskInput) -> str:
     )
 
 
+# ── DB Schema Tool ──
+
+class IndexDbInput(BaseModel):
+    """Input for live database schema indexing."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    connection_string: str = Field(
+        default="auto",
+        description="DB connection string (sqlite:///path, postgresql://..., mysql://...) or 'auto' to detect from env/config",
+    )
+    project_root: str = Field(default=".", description="Project root for auto-detection")
+    db_name: Optional[str] = Field(default=None, description="Override database name label")
+
+
+@mcp.tool(
+    name="neural_index_db",
+    annotations={
+        "title": "Neural Memory — Index Database Schema",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+async def neural_index_db(params: IndexDbInput) -> str:
+    """Index a live database schema into the knowledge graph.
+
+    Connects to a SQLite, PostgreSQL, or MySQL database and introspects its
+    schema (tables, columns, foreign keys), storing them as DATABASE/TABLE/COLUMN
+    nodes in the knowledge graph.
+
+    Use 'auto' for connection_string to detect DATABASE_URL from environment
+    or project .env file.
+    """
+    from .db.connector import detect_connection_string, fetch_schema
+    from .db.schema_indexer import index_db_schema
+
+    # Resolve connection string
+    cs = params.connection_string.strip()
+    if cs == "auto":
+        cs = detect_connection_string(params.project_root) or ""
+        if not cs:
+            return (
+                "# Neural Memory — DB Index Failed\n\n"
+                "Could not auto-detect a database connection string.\n\n"
+                "**Tried:** `DATABASE_URL` env var, `.env` file, `docker-compose.yml`\n\n"
+                "Please provide an explicit `connection_string` parameter."
+            )
+
+    # Derive db_name from connection string if not provided
+    db_name = params.db_name
+    if not db_name:
+        # Use filename for sqlite, or database part for others
+        if cs.startswith("sqlite:///"):
+            db_name = cs.split("/")[-1].replace(".db", "").replace(".sqlite", "") or "local"
+        else:
+            db_name = cs.split("/")[-1].split("?")[0] or "database"
+
+    try:
+        schemas = fetch_schema(cs)
+    except Exception as e:
+        return (
+            f"# Neural Memory — DB Index Failed\n\n"
+            f"**Connection string:** `{cs}`\n\n"
+            f"**Error:** {e}"
+        )
+
+    if not schemas:
+        return (
+            f"# Neural Memory — DB Index\n\n"
+            f"**Database:** {db_name}\n\n"
+            "No tables found in the database."
+        )
+
+    with Storage(params.project_root) as storage:
+        stats = index_db_schema(storage, schemas, db_name, source="live_db")
+
+    return (
+        f"# Neural Memory — DB Schema Indexed\n\n"
+        f"**Database:** {db_name}\n"
+        f"**Tables indexed:** {stats['tables_indexed']}\n"
+        f"**Columns indexed:** {stats['columns_indexed']}\n"
+        f"**FK edges created:** {stats['fk_edges']}\n"
+        f"**Total edges:** {stats['edges_created']}\n\n"
+        f"Use `neural_query` to search the schema, e.g. `neural_query` with query = `{db_name}`."
+    )
+
+
 # Entry point
 if __name__ == "__main__":
     mcp.run()
