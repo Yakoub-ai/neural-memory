@@ -19,8 +19,9 @@ env/
 .DS_Store
 Thumbs.db
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code local context and settings
+.claude/
+tests/
 
 # Type checking / linting
 .mypy_cache/

@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import warnings
 from typing import Optional
 
 from .models import NeuralNode, SummaryMode, NodeType, IndexMode
@@ -124,8 +125,14 @@ def generate_api_summary(node: NeuralNode, context_nodes: list[NeuralNode] = Non
                     parsed.get("detailed", _heuristic_detailed_summary(node))[:1000]
                 )
 
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError, Exception):
-        pass
+    except subprocess.TimeoutExpired:
+        warnings.warn(f"Claude CLI timed out summarizing {node.name}")
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        warnings.warn(f"Claude CLI returned unparseable output for {node.name}: {e}")
+    except FileNotFoundError:
+        warnings.warn("Claude CLI not found — falling back to heuristic summaries")
+    except Exception as e:
+        warnings.warn(f"Unexpected error summarizing {node.name}: {e}")
 
     # Fallback to heuristic
     return node.summary_short, _heuristic_detailed_summary(node)

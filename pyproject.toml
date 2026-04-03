@@ -1,6 +1,6 @@
 [project]
 name = "neural-memory"
-version = "0.1.0"
+version = "0.1.1"
 description = "A neural knowledge graph for codebases — layered code understanding for Claude Code"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,6 +32,12 @@ classifiers = [
 dependencies = [
     "mcp[cli]>=1.0.0",
     "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
 ]
 
 [project.urls]

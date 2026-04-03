@@ -249,11 +249,7 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
             stats["files_removed"] += 1
 
         # Process changes and additions
-        all_existing_nodes = {}
-        for nid in storage.get_all_node_ids():
-            node = storage.get_node(nid)
-            if node:
-                all_existing_nodes[nid] = node
+        all_existing_nodes = {n.id: n for n in storage.get_all_nodes()}
 
         for rel_path in changed_files:
             full_path = root / rel_path

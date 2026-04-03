@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass
 
 from .config import RedactionConfig
@@ -42,7 +43,7 @@ class Redactor:
     def __init__(self, config: RedactionConfig):
         self.config = config
         self._compiled_patterns: list[tuple[re.Pattern, str]] = []
-        self._sensitive_var_re: list[re.Pattern] = []
+        self._assign_patterns: list[re.Pattern] = []
         self._build_patterns()
 
     def _build_patterns(self) -> None:
@@ -54,12 +55,23 @@ class Redactor:
                 )
 
         for pattern in self.config.custom_patterns:
-            self._compiled_patterns.append(
-                (re.compile(pattern), "REDACTED_CUSTOM")
-            )
+            try:
+                compiled = re.compile(pattern)
+                compiled.search("a" * 20)  # smoke-test for obvious ReDoS
+                self._compiled_patterns.append((compiled, "REDACTED_CUSTOM"))
+            except re.error as e:
+                warnings.warn(f"Invalid redaction pattern ignored: {pattern!r} — {e}")
 
         for pattern in self.config.sensitive_var_patterns:
-            self._sensitive_var_re.append(re.compile(pattern))
+            var_re = re.compile(pattern)
+            raw = var_re.pattern.replace("(?i)", "")
+            # Strip outer capture group to avoid group numbering shift when we
+            # wrap in another (...) — otherwise \2 backreferences the wrong group
+            raw_clean = re.sub(r"^\((.+)\)$", r"\1", raw)
+            self._assign_patterns.append(re.compile(
+                rf"({raw_clean})\s*[:=]\s*(['\"])(.+?)\2",
+                re.IGNORECASE
+            ))
 
     def redact(self, text: str) -> RedactionResult:
         """Apply all redaction layers to text."""
@@ -76,19 +88,12 @@ class Redactor:
             result = new_result
 
         # Layer 2: AST-aware variable value redaction
-        # Redact values assigned to sensitive-named variables
-        for var_re in self._sensitive_var_re:
-            # Match: var_name = "value" or var_name = 'value'
-            # Strip inline flags from the source pattern and apply as compile flags
-            raw_pattern = var_re.pattern.replace("(?i)", "")
-            assign_pattern = re.compile(
-                rf"({raw_pattern})\s*[:=]\s*(['\"])(.+?)\2",
-                re.IGNORECASE
-            )
-            def _mask_value(m):
-                nonlocal count
-                count += 1
-                return f'{m.group(1)} = "[REDACTED]"'
+        def _mask_value(m):
+            nonlocal count
+            count += 1
+            return f'{m.group(1)} = "[REDACTED]"'
+
+        for assign_pattern in self._assign_patterns:
             result = assign_pattern.sub(_mask_value, result)
 
         # Layer 3: Check whitelist — un-redact known safe patterns

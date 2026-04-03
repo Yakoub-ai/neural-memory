@@ -10,6 +10,8 @@ from typing import Optional
 
 from .models import NeuralNode, NeuralEdge, NodeType, EdgeType, SummaryMode
 
+_UNRESOLVED = "__unresolved__"
+
 
 def _node_id(file_path: str, name: str, node_type: NodeType) -> str:
     """Generate a deterministic node ID."""
@@ -51,31 +53,31 @@ def _get_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     for i, arg in enumerate(args.args):
         s = arg.arg
         if arg.annotation:
-            s += f": {ast.dump(arg.annotation)}" if not hasattr(ast, 'unparse') else f": {ast.unparse(arg.annotation)}"
+            s += f": {ast.unparse(arg.annotation)}"
         default_idx = i - defaults_offset
         if default_idx >= 0 and default_idx < len(args.defaults):
             default = args.defaults[default_idx]
-            s += f" = {ast.unparse(default)}" if hasattr(ast, 'unparse') else " = ..."
+            s += f" = {ast.unparse(default)}"
         parts.append(s)
 
     # *args
     if args.vararg:
         s = f"*{args.vararg.arg}"
-        if args.vararg.annotation and hasattr(ast, 'unparse'):
+        if args.vararg.annotation:
             s += f": {ast.unparse(args.vararg.annotation)}"
         parts.append(s)
 
     # **kwargs
     if args.kwarg:
         s = f"**{args.kwarg.arg}"
-        if args.kwarg.annotation and hasattr(ast, 'unparse'):
+        if args.kwarg.annotation:
             s += f": {ast.unparse(args.kwarg.annotation)}"
         parts.append(s)
 
     sig = f"({', '.join(parts)})"
 
     # Return annotation
-    if node.returns and hasattr(ast, 'unparse'):
+    if node.returns:
         sig += f" -> {ast.unparse(node.returns)}"
 
     prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
@@ -86,12 +88,7 @@ def _get_decorators(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
     """Extract decorator names."""
     decorators = []
     for dec in node.decorator_list:
-        if hasattr(ast, 'unparse'):
-            decorators.append(ast.unparse(dec))
-        elif isinstance(dec, ast.Name):
-            decorators.append(dec.id)
-        elif isinstance(dec, ast.Attribute):
-            decorators.append(f"{ast.dump(dec)}")
+        decorators.append(ast.unparse(dec))
     return decorators
 
 
@@ -144,7 +141,7 @@ def _heuristic_summary(node: ast.AST, source_lines: list[str]) -> str:
             return docstring.strip().split('\n')[0].strip()[:200]
         methods = [n.name for n in node.body
                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        bases = [ast.unparse(b) if hasattr(ast, 'unparse') else "..." for b in node.bases]
+        bases = [ast.unparse(b) for b in node.bases]
         desc = f"class {node.name}"
         if bases:
             desc += f"({', '.join(bases)})"
@@ -229,7 +226,7 @@ def parse_file(file_path: str, source: Optional[str] = None) -> tuple[list[Neura
                 if call_name != item.name:  # Skip recursion for now
                     edges.append(NeuralEdge(
                         source_id=func_id,
-                        target_id=f"__unresolved__{call_name}",
+                        target_id=f"{_UNRESOLVED}{call_name}",
                         edge_type=EdgeType.CALLS,
                         context=f"called from {item.name}"
                     ))
@@ -262,10 +259,10 @@ def parse_file(file_path: str, source: Optional[str] = None) -> tuple[list[Neura
 
             # INHERITS edges
             for base in item.bases:
-                base_name = ast.unparse(base) if hasattr(ast, 'unparse') else "..."
+                base_name = ast.unparse(base)
                 edges.append(NeuralEdge(
                     source_id=class_id,
-                    target_id=f"__unresolved__{base_name}",
+                    target_id=f"{_UNRESOLVED}{base_name}",
                     edge_type=EdgeType.INHERITS,
                     context=f"{item.name} inherits from {base_name}"
                 ))
@@ -304,7 +301,7 @@ def parse_file(file_path: str, source: Optional[str] = None) -> tuple[list[Neura
                     for call_name in set(_extract_calls(method)):
                         edges.append(NeuralEdge(
                             source_id=method_id,
-                            target_id=f"__unresolved__{call_name}",
+                            target_id=f"{_UNRESOLVED}{call_name}",
                             edge_type=EdgeType.CALLS,
                             context=f"called from {item.name}.{method.name}"
                         ))
@@ -313,7 +310,7 @@ def parse_file(file_path: str, source: Optional[str] = None) -> tuple[list[Neura
     for module_name, alias in _extract_imports(tree):
         edges.append(NeuralEdge(
             source_id=mod_node.id,
-            target_id=f"__unresolved__{module_name}",
+            target_id=f"{_UNRESOLVED}{module_name}",
             edge_type=EdgeType.IMPORTS,
             context=f"import {module_name}" + (f" as {alias}" if alias else "")
         ))
@@ -322,26 +319,34 @@ def parse_file(file_path: str, source: Optional[str] = None) -> tuple[list[Neura
 
 
 def resolve_edges(all_nodes: dict[str, NeuralNode], edges: list[NeuralEdge]) -> list[NeuralEdge]:
-    """Resolve __unresolved__ edge targets to actual node IDs where possible."""
-    # Build name -> node_id lookup
-    name_to_id: dict[str, str] = {}
+    """Resolve unresolved edge targets to actual node IDs where possible.
+
+    Prefers same-file matches to avoid cross-file name collisions (e.g. two
+    files each defining a function called ``helper``).
+    """
+    # Build name -> [(node_id, file_path)] for disambiguation
+    name_to_candidates: dict[str, list[tuple[str, str]]] = {}
     for node in all_nodes.values():
-        name_to_id[node.name] = node.id
+        name_to_candidates.setdefault(node.name, []).append((node.id, node.file_path))
         # Also index short name (e.g., "MyClass.method" -> index "method" too)
         if "." in node.name:
             short = node.name.split(".")[-1]
-            if short not in name_to_id:
-                name_to_id[short] = node.id
+            name_to_candidates.setdefault(short, []).append((node.id, node.file_path))
 
     resolved = []
     for edge in edges:
-        if edge.target_id.startswith("__unresolved__"):
-            target_name = edge.target_id.replace("__unresolved__", "")
-            if target_name in name_to_id:
-                edge.target_id = name_to_id[target_name]
-                resolved.append(edge)
-            # Else: external call, drop the edge (or keep as unresolved)
-        else:
+        if not edge.target_id.startswith(_UNRESOLVED):
             resolved.append(edge)
+            continue
+        target_name = edge.target_id[len(_UNRESOLVED):]
+        candidates = name_to_candidates.get(target_name, [])
+        if not candidates:
+            continue
+        # Prefer same-file match; fall back to first candidate
+        source_node = all_nodes.get(edge.source_id)
+        source_file = source_node.file_path if source_node else None
+        same_file_match = next((cid for cid, fp in candidates if fp == source_file), None)
+        edge.target_id = same_file_match if same_file_match else candidates[0][0]
+        resolved.append(edge)
 
     return resolved

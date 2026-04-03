@@ -142,6 +142,10 @@ class Storage:
         rows = self.conn.execute("SELECT id FROM nodes").fetchall()
         return [r["id"] for r in rows]
 
+    def get_all_nodes(self) -> list[NeuralNode]:
+        rows = self.conn.execute("SELECT data FROM nodes").fetchall()
+        return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
+
     # ── Edge operations ──
 
     def upsert_edge(self, edge: NeuralEdge) -> None:
