@@ -10,11 +10,28 @@ Build the complete neural memory knowledge graph for this codebase.
 5. Computes importance scores for each node
 6. Optionally generates AI-powered summaries for high-importance nodes
 
-## Usage
-Run the `neural_index` tool. Options:
-- **mode**: `ast_only` (fast, local), `api_only` (rich summaries), or `both` (default)
-- **project_root**: defaults to current directory
+## How to call
 
-First run will take longer. Subsequent runs can use `/neural-update` for incremental changes.
+**Via MCP tool** (neural-memory configured as MCP server in Claude Code):
+```json
+Tool: neural_index
+{ "mode": "both" }
+```
+
+**Via Python** (working directly in the project):
+```python
+import asyncio
+from neural_memory.server import neural_index, IndexInput
+
+asyncio.run(neural_index(IndexInput(mode="both")))
+```
+
+## Parameters
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `project_root` | str | `"."` | Project root directory |
+| `mode` | str | config default | `"ast_only"` (fast/local), `"api_only"` (AI summaries), `"both"` (default) |
+
+First run takes longer. Subsequent runs can use `/neural-update` for incremental changes.
 
 After indexing, use `/neural-query` to search and `/neural-inspect` to deep-dive.
