@@ -206,30 +206,35 @@ def _html_head() -> str:
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0d1117;color:#c9d1d9;height:100vh;display:flex;flex-direction:column;overflow:hidden}
 #topbar{background:#161b22;border-bottom:1px solid #30363d;padding:8px 16px;display:flex;align-items:center;gap:16px;flex-shrink:0}
 #topbar h1{font-size:15px;font-weight:600;color:#58a6ff}
-.stats{font-size:12px;color:#8b949e;display:flex;gap:12px}
-#tabs{display:flex;gap:4px;margin-left:auto}
-.tab-btn{background:none;border:1px solid #30363d;color:#8b949e;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:12px}
+.stats{font-size:13px;color:#8b949e;display:flex;gap:12px}
+#tabs{display:flex;gap:6px;margin-left:auto}
+.tab-btn{background:none;border:1px solid #30363d;color:#8b949e;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:all .15s}
+.tab-btn:hover{background:#21262d;color:#c9d1d9;border-color:#484f58}
 .tab-btn.active{background:#58a6ff22;border-color:#58a6ff;color:#58a6ff}
 #main{display:flex;flex:1;overflow:hidden}
-#sidebar{width:220px;background:#161b22;border-right:1px solid #30363d;overflow-y:auto;padding:12px;flex-shrink:0;font-size:12px}
-.sb-head{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;margin:12px 0 6px}
-.filter-row{display:flex;align-items:center;gap:6px;margin:3px 0;cursor:pointer}
+#sidebar{width:260px;background:#161b22;border-right:1px solid #30363d;overflow-y:auto;padding:14px;flex-shrink:0;font-size:13px}
+.sb-head{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;margin:14px 0 8px;font-weight:600}
+.filter-row{display:flex;align-items:center;gap:8px;margin:4px 0;cursor:pointer;padding:3px 4px;border-radius:4px;transition:background .15s}
+.filter-row:hover{background:#21262d}
 .filter-row input,.filter-row label{cursor:pointer}
-select{width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:3px 6px;font-size:12px}
+select{width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:4px 8px;font-size:13px}
+select:focus{border-color:#58a6ff;outline:none}
 input[type=range]{width:100%;margin:4px 0;accent-color:#58a6ff}
-input[type=text]{width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:4px 8px;font-size:12px}
-.range-labels{display:flex;justify-content:space-between;font-size:10px;color:#8b949e}
+input[type=text]{width:100%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;padding:5px 10px;font-size:13px;transition:border-color .15s}
+input[type=text]:focus{border-color:#58a6ff;outline:none}
+.range-labels{display:flex;justify-content:space-between;font-size:11px;color:#8b949e}
 #view-area{flex:1;position:relative;overflow:hidden}
 .view-panel{position:absolute;inset:0;display:none}
 .view-panel.active{display:block}
 .chart-container{width:100%;height:100%}
-#detail-panel{position:absolute;right:0;top:0;bottom:0;width:300px;background:#161b22;border-left:1px solid #30363d;padding:16px;overflow-y:auto;transform:translateX(100%);transition:transform .2s;font-size:12px;z-index:10}
+#detail-panel{position:absolute;right:0;top:0;bottom:0;width:320px;background:#161b22ee;border-left:1px solid #30363d;padding:18px;overflow-y:auto;transform:translateX(100%);transition:transform .25s;font-size:13px;z-index:10;box-shadow:-4px 0 12px rgba(0,0,0,0.3)}
 #detail-panel.open{transform:translateX(0)}
-.close-btn{position:absolute;top:8px;right:8px;background:none;border:none;color:#8b949e;cursor:pointer;font-size:16px}
-.d-field{margin:8px 0}
-.d-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:2px}
-.d-value{color:#c9d1d9;line-height:1.4;word-break:break-word}
-.badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;margin:1px}
+.close-btn{position:absolute;top:8px;right:8px;background:none;border:none;color:#8b949e;cursor:pointer;font-size:18px;padding:4px 8px;border-radius:4px;transition:all .15s}
+.close-btn:hover{background:#30363d;color:#f0f6fc}
+.d-field{margin:10px 0}
+.d-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:3px;font-weight:600}
+.d-value{color:#c9d1d9;line-height:1.5;word-break:break-word;overflow-y:auto;max-height:150px}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;margin:2px}
 .edge-toggle-swatch{display:inline-block;width:16px;height:3px;border-radius:1px;vertical-align:middle;margin-right:4px}
 </style>
 </head>
@@ -336,20 +341,20 @@ function startApp() {
 
   // ── Node / edge style configs ──────────────────────────────────────────────
   var NODE_STYLE = {
-    module:             ['#58a6ff', 120, 44],
-    class:              ['#d2a8ff', 130, 46],
-    function:           ['#79c0ff',  96, 38],
-    method:             ['#79c0ff',  96, 36],
-    project_overview:   ['#f0e68c', 140, 44],
-    directory_overview: ['#8b949e', 120, 40],
-    config:             ['#e3b341',  96, 36],
-    export:             ['#56d364',  96, 34],
-    type_def:           ['#bc8cff', 100, 36],
-    other:              ['#8b949e',  88, 34],
-    bug:                ['#f85149', 110, 40],
-    phase:              ['#3fb950', 130, 44],
-    task:               ['#3fb950', 110, 38],
-    subtask:            ['#56d364',  96, 34]
+    module:             ['#58a6ff',  90, 34],
+    class:              ['#d2a8ff', 100, 36],
+    function:           ['#79c0ff',  72, 30],
+    method:             ['#79c0ff',  72, 28],
+    project_overview:   ['#f0e68c', 110, 36],
+    directory_overview: ['#8b949e',  90, 32],
+    config:             ['#e3b341',  72, 28],
+    export:             ['#56d364',  72, 26],
+    type_def:           ['#bc8cff',  76, 28],
+    other:              ['#8b949e',  66, 26],
+    bug:                ['#f85149',  84, 32],
+    phase:              ['#3fb950', 100, 36],
+    task:               ['#3fb950',  84, 30],
+    subtask:            ['#56d364',  72, 26]
   };
 
   var EDGE_STYLE = {
@@ -368,8 +373,8 @@ function startApp() {
   var CATEGORY_LIST = Object.keys(NODE_STYLE);
 
   function nodeStyleFor(type) { return NODE_STYLE[type] || ['#8b949e', 96, 36]; }
-  function nodeW(n) { var s = nodeStyleFor(n.node_type); return s[1] + (n.importance || 0) * 40; }
-  function nodeH(n) { var s = nodeStyleFor(n.node_type); return s[2] + (n.importance || 0) * 14; }
+  function nodeW(n) { var s = nodeStyleFor(n.node_type); return s[1] + (n.importance || 0) * 20; }
+  function nodeH(n) { var s = nodeStyleFor(n.node_type); return s[2] + (n.importance || 0) * 8; }
   function nodeColor(n) { return nodeStyleFor(n.node_type)[0]; }
   function edgeStyleFor(type) { return EDGE_STYLE[type] || ['#444d56', true, 1.0, true]; }
 
@@ -441,7 +446,7 @@ function startApp() {
     var s = n.summary_short || '';
     if (s.length > 120) s = s.slice(0, 120) + '\u2026';
     return (
-      '<div style="font-size:11px;max-width:230px;line-height:1.5">' +
+      '<div style="font-size:11px;max-width:240px;line-height:1.5;overflow:hidden;word-break:break-word">' +
       '<div style="font-weight:600;color:#e6edf3;margin-bottom:2px">' + n.name + '</div>' +
       '<div style="color:#8b949e">' + n.node_type + ' \u00b7 ' + n.category + '</div>' +
       (s ? '<div style="color:#c9d1d9;margin-top:4px">' + s + '</div>' : '') +
@@ -504,6 +509,9 @@ function startApp() {
     }
 
     panel.classList.add('open');
+    setTimeout(function() {
+      Object.keys(charts).forEach(function(id) { if (charts[id]) charts[id].resize(); });
+    }, 280);
   }
 
   // ── Hierarchy treemap ──────────────────────────────────────────────────────
@@ -523,14 +531,19 @@ function startApp() {
 
   function colorizeTree(node) {
     var raw = RAW.nodes.find(function(x) { return x.id === node.id; });
-    var cat = raw ? raw.category : (node.category || 'codebase');
-    var color = catColor(cat);
+    var nodeType = raw ? raw.node_type : (node.node_type || 'other');
+    var color = nodeStyleFor(nodeType)[0];
+    var imp = raw ? (raw.importance || 0) : 0;
+    // Scale fill from 30% opacity (low importance) to 60% (high importance)
+    var fillHex = Math.round(0x4d + imp * 0x52).toString(16).padStart(2, '0');
+    // Scale border from 60% opacity to 100%
+    var borderHex = Math.round(0x99 + imp * 0x66).toString(16).padStart(2, '0');
     var out = {
       id: node.id,
       name: node.name,
       value: node.value,
-      itemStyle: { color: color + '1e', borderColor: color + '66', borderWidth: 1 },
-      emphasis: { itemStyle: { color: color + '44', borderColor: color, borderWidth: 2 } }
+      itemStyle: { color: color + fillHex, borderColor: color + borderHex, borderWidth: 1 },
+      emphasis: { itemStyle: { color: color + 'bb', borderColor: color, borderWidth: 2 } }
     };
     if (node.children) out.children = node.children.map(colorizeTree);
     return out;
@@ -562,13 +575,42 @@ function startApp() {
         roam: false,
         breadcrumb: {
           show: true,
-          bottom: 8,
-          height: 22,
-          itemStyle: { color: '#161b22', borderColor: '#30363d', textStyle: { color: '#8b949e', fontSize: 11 } },
-          emphasis: { itemStyle: { color: '#21262d' } }
+          bottom: 10,
+          height: 26,
+          itemStyle: { color: '#21262d', borderColor: '#484f58', borderWidth: 1, textStyle: { color: '#c9d1d9', fontSize: 12 } },
+          emphasis: { itemStyle: { color: '#30363d' } }
         },
-        label: { show: true, formatter: '{b}', fontSize: 10, color: '#e6edf3', overflow: 'truncate' },
-        upperLabel: { show: true, height: 18, fontSize: 10, color: '#e6edf3', overflow: 'truncate' },
+        label: {
+          show: true,
+          formatter: function(params) {
+            var raw = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+            var prefix = '';
+            if (raw) {
+              var t = raw.node_type;
+              if (t === 'module') prefix = '\u25a0 ';
+              else if (t === 'class' || t === 'phase') prefix = '\u25c6 ';
+              else if (t === 'function' || t === 'method') prefix = '\u0192 ';
+              else if (t === 'bug') prefix = '\u26a0 ';
+              else if (t === 'task' || t === 'subtask') prefix = '\u2611 ';
+            }
+            return prefix + params.name;
+          },
+          fontSize: 11,
+          fontWeight: 500,
+          color: '#f0f6fc',
+          overflow: 'truncate',
+          padding: [2, 4]
+        },
+        upperLabel: {
+          show: true,
+          height: 22,
+          fontSize: 11,
+          fontWeight: 600,
+          color: '#f0f6fc',
+          overflow: 'truncate',
+          backgroundColor: '#161b2299',
+          padding: [2, 6, 2, 6]
+        },
         itemStyle: { gapWidth: 2, borderWidth: 0 },
         levels: [
           { itemStyle: { borderWidth: 3, borderColor: '#0d1117', gapWidth: 5 } },
@@ -697,9 +739,14 @@ function startApp() {
           return params.data.symbolSize || 10;
         },
         lineStyle: { color: '#30363d88', width: 1.2, curveness: 0.45 },
+        scaleLimit: { min: 0.3, max: 4 },
         emphasis: {
-          focus: 'ancestor',
+          focus: 'descendant',
           lineStyle: { width: 2.5, color: '#58a6ff55' }
+        },
+        blur: {
+          itemStyle: { opacity: 0.35 },
+          lineStyle: { opacity: 0.15 }
         },
         // Series-level label; per-node label.show controls visibility
         label: {
@@ -707,11 +754,11 @@ function startApp() {
           formatter: function(params) {
             if (params.data.label && params.data.label.show === false) return '';
             var n = params.data.name || '';
-            return n.length > 16 ? n.slice(0, 14) + '\u2026' : n;
+            return n.length > 18 ? n.slice(0, 16) + '\u2026' : n;
           },
-          fontSize: 9,
+          fontSize: 10,
           color: '#c9d1d9',
-          distance: 6,
+          distance: 10,
           rotate: 0
         },
         leaves: {
@@ -720,28 +767,35 @@ function startApp() {
             position: 'right',
             verticalAlign: 'middle',
             align: 'left',
-            fontSize: 9,
+            fontSize: 10,
             color: '#8b949e',
-            distance: 5,
+            distance: 8,
             formatter: function(params) {
               if (params.data.label && params.data.label.show === false) return '';
               var n = params.data.name || '';
-              return n.length > 14 ? n.slice(0, 12) + '\u2026' : n;
+              return n.length > 16 ? n.slice(0, 14) + '\u2026' : n;
             }
           }
         },
-        expandAndCollapse: true,
-        animationDuration: 550,
-        animationDurationUpdate: 750,
+        expandAndCollapse: false,
+        animationDuration: 400,
+        animationDurationUpdate: 600,
         initialTreeDepth: initDepth
       }]
     }, true);
 
     chart.off('click');
+    chart.off('dblclick');
     chart.on('click', function(params) {
       if (!params.data || !params.data.id) return;
       var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
       if (n) showDetail(n);
+    });
+    // Double-click to manually toggle collapse on a subtree node
+    chart.on('dblclick', function(params) {
+      if (!params.data) return;
+      params.data.collapsed = !params.data.collapsed;
+      chart.setOption({ series: [{ data: [treeRoot] }] }, false);
     });
   }
 
@@ -753,11 +807,15 @@ function startApp() {
     return nodes.map(function(n) {
       var color = nodeColor(n);
       var catIdx = CATEGORY_LIST.indexOf(n.node_type);
+      var w = nodeW(n);
+      // ~7px per char at fontSize 10 with 6px padding each side
+      var maxChars = Math.max(4, Math.floor((w - 12) / 7));
+      var label = n.name.length > maxChars ? n.name.slice(0, maxChars - 1) + '\u2026' : n.name;
       return {
         id: n.id,
         name: n.name,
-        symbolSize: [nodeW(n), nodeH(n)],
-        symbol: n.node_type === 'bug' ? 'diamond' : (n.node_type === 'phase' ? 'roundRect' : 'roundRect'),
+        symbolSize: [w, nodeH(n)],
+        symbol: n.node_type === 'bug' ? 'diamond' : 'roundRect',
         itemStyle: {
           color: color + '22',
           borderColor: color,
@@ -770,10 +828,12 @@ function startApp() {
         },
         label: {
           show: true,
-          formatter: n.name.length > 20 ? n.name.slice(0, 18) + '\u2026' : n.name,
+          formatter: label,
           fontSize: 10,
           color: '#e6edf3',
-          position: 'inside'
+          position: 'inside',
+          overflow: 'truncate',
+          width: w - 12
         },
         category: catIdx >= 0 ? catIdx : 0,
         value: n.importance || 0,
@@ -853,13 +913,17 @@ function startApp() {
         draggable: true,
         animation: true,
         animationDuration: 800,
-        force: {
-          repulsion: [120, 380],
-          edgeLength: [70, 130],
-          gravity: 0.08,
-          friction: 0.65,
-          layoutAnimation: true
-        },
+        force: (function() {
+          var nc = gNodes.length;
+          var repBase = Math.max(250, 150 + nc * 3);
+          return {
+            repulsion: [repBase, repBase * 2.5],
+            edgeLength: [100, 200],
+            gravity: 0.05,
+            friction: 0.6,
+            layoutAnimation: true
+          };
+        })(),
         emphasis: {
           focus: 'adjacency',
           blurScope: 'global',
@@ -1042,6 +1106,9 @@ function startApp() {
     // Close detail
     document.getElementById('close-detail').addEventListener('click', function() {
       document.getElementById('detail-panel').classList.remove('open');
+      setTimeout(function() {
+        Object.keys(charts).forEach(function(id) { if (charts[id]) charts[id].resize(); });
+      }, 280);
     });
 
     // Tabs
