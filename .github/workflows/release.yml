@@ -4,6 +4,9 @@ on:
   push:
     tags: ["v*.*.*"]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: write    # create GitHub releases + tags
   id-token: write    # PyPI trusted publishing (OIDC — no API key needed)
