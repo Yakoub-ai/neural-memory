@@ -1025,7 +1025,7 @@ function startApp() {
       _focusedId = null;
       var updNodes = buildGraphNodes(nodes, _graphZoom);
       var updLinks = buildGraphLinks(nodes, allEdges);
-      chart.setOption({ series: [{ data: updNodes, links: updLinks }] }, false);
+      chart.setOption({ series: [{ data: updNodes, links: updLinks, force: { layoutAnimation: false } }] }, false);
     }
 
     chart.on('click', function(params) {
@@ -1052,16 +1052,16 @@ function startApp() {
       if (!evt.target) drawGraph();
     });
 
-    // Zoom-responsive label sizing
+    // Zoom-responsive font sizing — only update fontSize, never rebuild nodes
     var _zoomTimer = null;
     chart.on('graphroam', function(params) {
       if (!params.zoom) return;
       _graphZoom = Math.max(0.3, Math.min(6, _graphZoom * params.zoom));
       clearTimeout(_zoomTimer);
       _zoomTimer = setTimeout(function() {
-        if (_focusedId) { _applyFocus(_focusedId); return; }
-        chart.setOption({ series: [{ data: buildGraphNodes(nodes, _graphZoom) }] }, false);
-      }, 80);
+        var fs = Math.min(52, Math.max(14, Math.round(16 * _graphZoom)));
+        chart.setOption({ series: [{ label: { fontSize: fs }, force: { layoutAnimation: false } }] }, false);
+      }, 100);
     });
   }
 
@@ -1250,17 +1250,19 @@ function startApp() {
         if (!chart || state.tab !== 'graph') return;
         var air = parseInt(airSlider.value);
         var nc = chart.getOption().series[0].data.length;
-        var repBase = Math.max(120, 80 + nc * 1.5) + air * 50;
+        var repBase = Math.max(260, 160 + nc * 2) + air * 60;
+        // Brief animation to reposition, then lock immediately
         chart.setOption({ series: [{ force: {
           repulsion: repBase,
-          edgeLength: [60 + air * 8, 120 + air * 16],
-          gravity: Math.max(0.05, 0.18 - air * 0.012),
+          edgeLength: [80 + air * 10, 160 + air * 20],
+          gravity: Math.max(0.04, 0.15 - air * 0.01),
+          friction: 0.98,
           layoutAnimation: true
         }}] }, false);
         clearTimeout(_airTimer);
         _airTimer = setTimeout(function() {
           chart.setOption({ series: [{ force: { layoutAnimation: false } }] }, false);
-        }, 1200);
+        }, 800);
       });
     }
 
