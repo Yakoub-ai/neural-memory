@@ -33,24 +33,36 @@ def _now() -> str:
 
 
 def _find_code_nodes_for_file(storage: "Storage", file_path: str) -> list[NeuralNode]:
-    """Return code nodes whose file_path matches the given path (partial match)."""
+    """Return code nodes whose file_path matches the given path.
+
+    Scores matches by path specificity to avoid returning wrong files when
+    multiple files share the same basename (e.g. app/auth.py vs tests/auth.py).
+    Exact and suffix matches score higher than basename-only matches.
+    """
     if not file_path:
         return []
-    # Normalize: strip leading path separators, try basename match
-    target = file_path.strip().lstrip("/\\")
+    target = file_path.strip().lstrip("/\\").replace("\\", "/")
+    target_basename = os.path.basename(target)
     all_nodes = storage.get_all_nodes()
-    matches = []
+    scored: list[tuple[int, NeuralNode]] = []
     for n in all_nodes:
-        if n.category == "codebase" and (
-            n.file_path == target
-            or n.file_path.endswith(target)
-            or target.endswith(n.file_path)
-            or os.path.basename(n.file_path) == os.path.basename(target)
-        ):
-            matches.append(n)
-    # Return at most 3 best matches (prefer exact path, then basename)
-    exact = [n for n in matches if n.file_path == target or n.file_path.endswith(target)]
-    return (exact or matches)[:3]
+        if n.category != "codebase" or not n.file_path:
+            continue
+        node_path = n.file_path.replace("\\", "/")
+        if node_path == target:
+            scored.append((3, n))
+        elif node_path.endswith("/" + target) or node_path.endswith(target):
+            scored.append((2, n))
+        elif target.endswith("/" + node_path) or target.endswith(node_path):
+            scored.append((2, n))
+        elif os.path.basename(node_path) == target_basename:
+            scored.append((1, n))
+    # Sort by score descending, return top 3 — prefer higher specificity
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_score = scored[0][0] if scored else 0
+    # Only return basename matches if no path matches exist
+    results = [n for score, n in scored if score == top_score]
+    return results[:3]
 
 
 # ── Gotchas parser → BUG nodes ─────────────────────────────────────────────────

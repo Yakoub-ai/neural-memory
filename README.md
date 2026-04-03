@@ -30,47 +30,22 @@ Search uses a **three-phase branch algorithm**: seed by cosine similarity → ex
 
 ## Quick Start
 
-**Step 1 — Install:**
-```bash
-pip install "neural-memory[all] @ git+https://github.com/Yakoub-ai/neural-memory.git"
+**Step 1 — Install via Claude Code plugin marketplace** (recommended — no manual setup):
+```
+/plugin marketplace add Yakoub-ai/neural-memory
+/plugin install neural-memory@Yakoub-ai
 ```
 
-**Step 2 — Register the MCP server** in `~/.claude.json` (global, works across all projects):
-```json
-{
-  "mcpServers": {
-    "neural-memory": {
-      "command": "python",
-      "args": ["-m", "neural_memory.server"],
-      "cwd": "/path/to/your/project"
-    }
-  }
-}
-```
+The plugin automatically registers the MCP server via `uvx` — no pip install or config editing needed.
 
-Or use the `neural-memory` console script if it is on your PATH:
-```json
-{
-  "mcpServers": {
-    "neural-memory": {
-      "command": "neural-memory"
-    }
-  }
-}
+**Step 2 — Build the knowledge graph:**
 ```
-
-**Step 3 — Install slash commands** into your project:
-```bash
-cd your-project
-neural-memory-setup install-commands
-```
-
-**Step 4 — Build the knowledge graph:**
-```
-/neural-index
+/neural-memory:neural-index
 ```
 
 **Done.** Claude now has persistent, token-efficient context about your entire codebase.
+
+> **Manual setup?** See [Installation Options](#installation-options) below.
 
 ---
 
@@ -78,77 +53,58 @@ neural-memory-setup install-commands
 
 ### Option A — Claude Code Plugin (Recommended)
 
-The plugin marketplace handles MCP registration and slash command setup automatically.
+No pip install required. The MCP server runs via `uvx` directly from PyPI.
 
-```bash
-pip install "neural-memory[all] @ git+https://github.com/Yakoub-ai/neural-memory.git"
-```
-
-Then in Claude Code:
+In Claude Code:
 ```
 /plugin marketplace add Yakoub-ai/neural-memory
 /plugin install neural-memory@Yakoub-ai
 ```
+
+Skills are namespaced: `/neural-memory:neural-index`, `/neural-memory:neural-query`, etc.
 
 ### Option B — Manual MCP Setup
 
 **1. Install the package:**
 ```bash
 # Core only (no embeddings/visualization)
-pip install "neural-memory @ git+https://github.com/Yakoub-ai/neural-memory.git"
+pip install neural-memory-mcp
 
 # With semantic search (recommended)
-pip install "neural-memory[vectors] @ git+https://github.com/Yakoub-ai/neural-memory.git"
+pip install "neural-memory-mcp[vectors]"
 
-# With everything (embeddings + D3 dashboard)
-pip install "neural-memory[all] @ git+https://github.com/Yakoub-ai/neural-memory.git"
+# With everything (embeddings + dashboard)
+pip install "neural-memory-mcp[all]"
 ```
 
-**2. Add to `~/.claude.json`** (global, persists across projects):
+**2. Add to your project's `.mcp.json`:**
 ```json
 {
   "mcpServers": {
     "neural-memory": {
-      "command": "python",
-      "args": ["-m", "neural_memory.server"],
-      "cwd": "/path/to/your/project"
+      "command": "uvx",
+      "args": ["--from", "neural-memory-mcp", "neural-memory"]
     }
   }
 }
 ```
 
-Or add to your project's `.mcp.json` (project-scoped):
-```json
-{
-  "mcpServers": {
-    "neural-memory": {
-      "command": "python",
-      "args": ["-m", "neural_memory.server"]
-    }
-  }
-}
-```
+Or add to `~/.claude.json` for global access across all projects.
 
-**3. Install slash commands (optional but recommended):**
-```bash
-neural-memory-setup install-commands
-```
-
-**4. Add the agent hook** to your project's `CLAUDE.md` so Claude always checks freshness:
+**3. Add the agent hook** to your project's `CLAUDE.md` so Claude always checks freshness:
 ```markdown
 ## Agent Hook
 On each invocation, check neural memory staleness by running the `neural_status` tool.
 If the index is stale or uninitialized, inform the user and suggest the appropriate action.
 ```
 
-### Option C — Project-local (no global install)
+### Option C — From source
 
 ```bash
-git clone https://github.com/Yakoub-ai/neural-memory.git /path/to/neural-memory
-pip install -e "/path/to/neural-memory[all]"
+git clone https://github.com/Yakoub-ai/neural-memory.git
+cd neural-memory
+pip install -e ".[all]"
 ```
-
-Then set `"cwd": "/path/to/neural-memory"` in your MCP config.
 
 ---
 
@@ -156,14 +112,18 @@ Then set `"cwd": "/path/to/neural-memory"` in your MCP config.
 
 ### Slash Commands (in Claude Code)
 
-| Command | MCP Tool | Description |
-|---------|----------|-------------|
-| `/neural-index` | `neural_index` | Full index of all Python files + context logs. Parses AST, imports bugs/tasks, computes embeddings, generates overviews. Run once at project start or after large changes. |
-| `/neural-update` | `neural_update` | Incremental update via git diff + file hash comparison. Only re-parses changed files. Fast — run after any code change. |
-| `/neural-query` | `neural_query` | Semantic search across all three layers. Finds functions, classes, bugs, and tasks by concept. Uses 128-dim embeddings + graph expansion. |
-| `/neural-inspect` | `neural_inspect` | Deep-dive into a node: full summary, callers, callees, parent/children, LSP type info, diagnostics. |
-| `/neural-status` | `neural_status` | Index health check — shows total nodes/edges, last index time, git staleness, and a freshness verdict. |
-| `/neural-config` | `neural_config` | View or modify settings: indexing mode, include/exclude patterns, redaction rules, LSP settings. |
+When installed via plugin, skills are namespaced as `/neural-memory:<skill>`. When used standalone (`.claude/` directory), they run as `/neural-<skill>`.
+
+| Skill | MCP Tool | Description |
+|-------|----------|-------------|
+| `neural-index` | `neural_index` | Full index of all Python files + context logs. Parses AST, imports bugs/tasks, computes embeddings, generates overviews. Run once at project start or after large changes. |
+| `neural-update` | `neural_update` | Incremental update via git diff + file hash comparison. Only re-parses changed files. Fast — run after any code change. |
+| `neural-query` | `neural_query` | Semantic search across all three layers. Finds functions, classes, bugs, and tasks by concept. Uses 128-dim embeddings + graph expansion. |
+| `neural-inspect` | `neural_inspect` | Deep-dive into a node: full summary, callers, callees, parent/children, LSP type info, diagnostics. |
+| `neural-status` | `neural_status` | Index health check — shows total nodes/edges, last index time, git staleness, and a freshness verdict. |
+| `neural-config` | `neural_config` | View or modify settings: indexing mode, include/exclude patterns, redaction rules, staleness threshold. |
+| `neural-visualize` | `neural_serve` | Generate the interactive dashboard and open it in your browser at `http://localhost:7891`. |
+| `neural-stop` | `neural_stop_serve` | Stop the running dashboard HTTP server. |
 
 ### MCP Tools (callable by Claude directly)
 
@@ -255,11 +215,35 @@ View or update configuration.
 ```
 Parameters:
   project_root      string  Project root directory (default: ".")
-  action            string  "get" | "set_mode" | "add_exclude" | "add_redaction_pattern" | "set_lsp"
-  value             string  Value for the action (e.g. "ast_only", "**/.venv/**", "(?i)my_secret")
+  action            string  "view" | "set_mode" | "add_exclude" | "add_redaction_pattern" | "set_staleness_threshold"
+  value             string  Value for the action (e.g. "ast_only", "**/.venv/**", "(?i)my_secret", "10")
 ```
 
 Available modes: `ast_only` (no API calls), `api` (API only), `both` (heuristic + API enrichment).
+
+---
+
+#### `neural_serve`
+Start the interactive dashboard HTTP server.
+
+```
+Parameters:
+  project_root  string  Project root directory (default: ".")
+  port          int     Port to serve on (default: 7891)
+  open_browser  bool    Auto-open in browser (default: true)
+  regenerate    bool    Regenerate dashboard HTML before serving (default: true)
+```
+
+Opens `http://localhost:7891` with three views: Hierarchy treemap, Semantic radial tree, Force-directed graph.
+
+---
+
+#### `neural_stop_serve`
+Stop the running dashboard server.
+
+```
+Parameters: none
+```
 
 ---
 
@@ -378,10 +362,11 @@ Enriched nodes gain:
 - `lsp_hover_doc` — resolved type signatures and docstrings
 - `lsp_diagnostics` — type errors and warnings at definition site
 
-Disable LSP enrichment:
+Disable LSP enrichment via `neural_config`:
 ```
-/neural-config  →  set_lsp: none
+action: "set_mode", value: "ast_only"   # disables all API + LSP calls
 ```
+Or keep API summaries but disable LSP specifically by setting `lsp_enabled: false` in `.neural-memory/config.json`.
 
 ---
 
@@ -389,7 +374,7 @@ Disable LSP enrichment:
 
 Requires numpy:
 ```bash
-pip install "neural-memory[vectors] @ git+https://github.com/Yakoub-ai/neural-memory.git"
+pip install "neural-memory-mcp[vectors]"
 ```
 
 Neural Memory builds **128-dimensional composite embeddings**:
@@ -512,7 +497,7 @@ Delete `.neural-memory/memory.db` and re-run `/neural-index`. The schema will be
 Run `/neural-index` (not `/neural-update`) to force re-import of context logs.
 
 **Embeddings not computing**
-Install numpy: `pip install "neural-memory[vectors]"`. Without it, search falls back to name/summary text matching.
+Install numpy: `pip install "neural-memory-mcp[vectors]"`. Without it, search falls back to name/summary text matching.
 
 **LSP enrichment skipped**
 Install `pyright` (`npm install -g pyright`) or `pylsp` (`pip install python-lsp-server`). Or disable with `set_lsp: none`.
@@ -532,6 +517,8 @@ neural-memory-setup doctor   # full diagnosis
 git clone https://github.com/Yakoub-ai/neural-memory.git
 cd neural-memory
 pip install -e ".[all]"
+pip install -e ".[test]"
+pytest --tb=short -q
 ```
 
 ---
