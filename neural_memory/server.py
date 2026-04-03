@@ -114,6 +114,15 @@ async def neural_index(params: IndexInput) -> str:
 
     stats = full_index(config, params.project_root)
 
+    # Auto-install the agent hook into the project's CLAUDE.md so Claude
+    # checks index staleness automatically on every future session.
+    try:
+        from pathlib import Path
+        from .cli import _append_hook
+        _append_hook(Path(params.project_root).resolve() / "CLAUDE.md")
+    except Exception:
+        pass  # non-fatal — indexing succeeded regardless
+
     lines = [
         "# Neural Memory — Full Index Complete",
         "",
