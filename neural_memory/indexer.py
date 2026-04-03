@@ -182,6 +182,15 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
     except Exception as e:
         stats["errors"].append(f"orm_detector: {e}")
 
+    # Phase 2.6: Query tracing — link functions/methods to tables they access
+    try:
+        from .db.query_tracer import trace_queries
+        query_edges = trace_queries(all_nodes, all_edges)
+        all_edges.extend(query_edges)
+        stats["db_query_edges"] = len(query_edges)
+    except Exception as e:
+        stats["errors"].append(f"query_tracer: {e}")
+
     # Phase 3: Redact sensitive content
     for node in all_nodes.values():
         if node.raw_code:

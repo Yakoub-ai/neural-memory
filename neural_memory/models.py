@@ -49,6 +49,8 @@ class EdgeType(str, Enum):
     PHASE_CONTAINS = "phase_contains"   # phase → task
     TASK_CONTAINS = "task_contains"     # task → subtask
     REFERENCES = "references"          # FK relationship between tables
+    QUERIES = "queries"                # function/method → table (read access)
+    WRITES_TO = "writes_to"           # function/method → table (write access)
 
 
 class SummaryMode(str, Enum):
