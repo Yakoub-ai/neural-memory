@@ -88,8 +88,10 @@ def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]
     id_idx = {nid: i for i, nid in enumerate(ids)}
     n = len(ids)
 
-    # Scale canvas with node count so there's enough room for all nodes
-    area_scale = max(1.0, math.sqrt(n / 25.0))
+    # Canvas scales so a sqrt(n)×sqrt(n) grid of nodes fits with comfortable gaps.
+    # We need area ∝ n (linear), so area_scale ∝ sqrt(n).
+    # sqrt(n/4) gives ~2× more space per node than sqrt(n/15).
+    area_scale = max(1.0, math.sqrt(n / 4.0))
     W, H = 1000.0 * area_scale, 800.0 * area_scale
 
     # Seed from PCA so semantically similar nodes start close
@@ -112,9 +114,9 @@ def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]
                 ep.append((id_idx[s], id_idx[t]))
         ep_arr = np.array(ep, dtype=np.int32) if ep else np.empty((0, 2), dtype=np.int32)
 
-        # k is the ideal inter-node distance; enforce a minimum to prevent overlap
-        # Average node is ~90px wide × 30px tall; 2.5× gives comfortable separation
-        k = max(math.sqrt(W * H / max(n, 1)) * 1.6, 225.0)
+        # k: ideal FR inter-node distance. Increased multiplier (2.0) and floor (400)
+        # so nodes spread aggressively during FR before overlap removal takes over.
+        k = max(math.sqrt(W * H / max(n, 1)) * 2.0, 400.0)
         temp = W / 4.0
         cooling = temp / 61.0
 
@@ -137,16 +139,26 @@ def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]
 
             dlen = np.linalg.norm(disp, axis=1, keepdims=True).clip(min=1.0)
             pos += disp / dlen * np.minimum(dlen, temp)
-            pos[:, 0] = pos[:, 0].clip(-W / 2, W / 2)
-            pos[:, 1] = pos[:, 1].clip(-H / 2, H / 2)
+            # Clip to ±W (was ±W/2) so FR itself can spread nodes across the full canvas
+            pos[:, 0] = pos[:, 0].clip(-W, W)
+            pos[:, 1] = pos[:, 1].clip(-H, H)
             temp = max(temp - cooling, 0.5)
 
-        # Overlap removal post-pass: push apart nodes whose bounding boxes collide.
-        # min_sep scales with W so that on-screen separation (after ECharts auto-fit)
-        # always exceeds the node's screen size — W*0.22 / (2*W/viewport) = 0.11*viewport.
-        min_sep_x = max(160.0, W * 0.22)
-        min_sep_y = max(80.0, H * 0.13)
-        for _ in range(25):
+        # Overlap removal: push apart nodes whose bounding boxes collide.
+        #
+        # min_sep is sized so a sqrt(n)×sqrt(n) grid fits in [-4W, 4W]:
+        #   grid_width = (sqrt(n)-1) * min_sep ≤ 8*W
+        #   → min_sep = 8*W / (sqrt(n)-1) ≈ 6*W / sqrt(n)  [for n≥4]
+        #
+        # This guarantees: after overlap removal, ECharts auto-fit maps nodes to
+        # ≥2× their rendered pixel width apart at any node count.
+        sqn = max(math.sqrt(n), 2.0)
+        min_sep_x = max(200.0, 6.0 * W / sqn)
+        min_sep_y = max(100.0, 6.0 * H / sqn)
+
+        # Lower push factor (0.35 vs 0.5) and many more iterations to avoid
+        # oscillation on dense graphs; break early when fully resolved.
+        for _ in range(150):
             dx = pos[:, np.newaxis, 0] - pos[np.newaxis, :, 0]   # (n,n)
             dy = pos[:, np.newaxis, 1] - pos[np.newaxis, :, 1]
             ovlp_x = min_sep_x - np.abs(dx)
@@ -157,11 +169,10 @@ def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]
                 break
             sx = np.where(dx >= 0, 1.0, -1.0)
             sy = np.where(dy >= 0, 1.0, -1.0)
-            push_x = (mask * ovlp_x * sx * 0.5).sum(axis=1)
-            push_y = (mask * ovlp_y * sy * 0.5).sum(axis=1)
-            # Use expanded clip so overlap removal can push beyond FR bounds
-            pos[:, 0] = (pos[:, 0] + push_x).clip(-W * 1.5, W * 1.5)
-            pos[:, 1] = (pos[:, 1] + push_y).clip(-H * 1.5, H * 1.5)
+            push_x = (mask * ovlp_x * sx * 0.35).sum(axis=1)
+            push_y = (mask * ovlp_y * sy * 0.35).sum(axis=1)
+            pos[:, 0] = (pos[:, 0] + push_x).clip(-W * 4.0, W * 4.0)
+            pos[:, 1] = (pos[:, 1] + push_y).clip(-H * 4.0, H * 4.0)
 
         return {ids[i]: [round(float(pos[i, 0]), 1), round(float(pos[i, 1]), 1)]
                 for i in range(n)}
@@ -376,7 +387,7 @@ def _html_body() -> str:
       <div class="sb-head">Edge Types</div>
       <div id="edge-toggles"></div>
       <div class="sb-head" style="margin-top:10px">Node Spacing</div>
-      <input type="range" id="air-slider" min="0" max="10" step="1" value="5">
+      <input type="range" id="air-slider" min="0" max="20" step="1" value="2">
       <div class="range-labels"><span>Tight</span><span>Spread</span></div>
       <div class="sb-head" style="margin-top:6px">Graph Options</div>
       <div class="filter-row">
@@ -501,7 +512,8 @@ function startApp() {
     minImp: 0,
     statuses: { open: true, fixed: true, pending: true, in_progress: true, done: true, '': true },
     search: '',
-    depth: 3
+    depth: 3,
+    selectedId: null
   };
 
   var edgeVisible = {};
@@ -575,6 +587,7 @@ function startApp() {
     var panel = document.getElementById('detail-panel');
     var content = document.getElementById('detail-content');
     clearEl(content);
+    state.selectedId = n.id;
 
     var color = catColor(n.category);
 
@@ -975,7 +988,7 @@ function startApp() {
     // Scale nodes down for large graphs so they don't overlap after ECharts auto-fit.
     // ECharts fits the bounding box to viewport, so screen_sep ∝ 1/sqrt(n).
     // Scaling node size by the same factor keeps separation > node size at any n.
-    var sizeScale = Math.max(0.38, Math.min(1.0, Math.sqrt(30 / Math.max(1, nodes.length))));
+    var sizeScale = Math.max(0.15, Math.min(1.0, Math.sqrt(30 / Math.max(1, nodes.length))));
     return nodes.map(function(n) {
       var color = nodeColor(n);
       var catIdx = CATEGORY_LIST.indexOf(n.node_type);
@@ -1043,7 +1056,7 @@ function startApp() {
       });
   }
 
-  var _airScale = 1 + 5 * 0.18;  // default matches air-slider value="5"
+  var _airScale = 1 + 2 * 0.2;  // default matches air-slider value="2" (tighter default; layout is already spread)
 
   function drawGraph() {
     var chart = getChart('graph');
@@ -1087,8 +1100,9 @@ function startApp() {
         roam: true,
         draggable: true,
         animation: false,
-        // Zoom in so ~30 nodes are comfortably visible at once; users can zoom out
-        zoom: Math.max(1.0, Math.sqrt(gNodes.length / 30)),
+        // zoom:1 = ECharts auto-fits the full position bounding box to the viewport.
+        // This guarantees all nodes are visible on load; users zoom in for detail.
+        zoom: 1.0,
         emphasis: { scale: false, focus: 'adjacency', blurScope: 'global' },
         blur: { itemStyle: { opacity: 0.05 }, lineStyle: { opacity: 0.02 }, label: { opacity: 0 } },
         categories: categories,
@@ -1290,9 +1304,12 @@ function startApp() {
 
     // Close detail
     document.getElementById('close-detail').addEventListener('click', function() {
+      state.selectedId = null;
+      var ac = charts[state.tab];
+      if (ac) ac.dispatchAction({ type: 'downplay', seriesIndex: 0 });
       document.getElementById('detail-panel').classList.remove('open');
       setTimeout(function() {
-        var ac = charts[state.tab]; if (ac) ac.resize();
+        var ac2 = charts[state.tab]; if (ac2) ac2.resize();
       }, 320);
     });
 
@@ -1330,7 +1347,7 @@ function startApp() {
       airSlider.addEventListener('input', function() {
         var chart = charts['graph'];
         if (!chart || state.tab !== 'graph') return;
-        _airScale = 1 + parseInt(airSlider.value) * 0.18;
+        _airScale = 1 + parseInt(airSlider.value) * 0.2;
         clearTimeout(_airDebounce);
         _airDebounce = setTimeout(function() {
           // Only update node positions — links don't need rebuild for layout:'none'
@@ -1343,12 +1360,24 @@ function startApp() {
     buildEdgeToggles();
   }
 
+  // ── Cross-tab selection ────────────────────────────────────────────────────
+
+  function applySelection() {
+    if (!state.selectedId) return;
+    var chart = charts[state.tab];
+    if (!chart) return;
+    var n = NODE_MAP[state.selectedId];
+    if (!n) return;
+    chart.dispatchAction({ type: 'highlight', seriesIndex: 0, name: n.name });
+  }
+
   // ── Redraw ─────────────────────────────────────────────────────────────────
 
   function redraw() {
     if (state.tab === 'hierarchy') drawHierarchy();
     else if (state.tab === 'vectors') drawVectors();
     else if (state.tab === 'graph') drawGraph();
+    applySelection();
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────
