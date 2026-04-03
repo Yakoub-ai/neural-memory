@@ -13,6 +13,8 @@ def compute_importance(storage: Storage) -> None:
     """Compute importance scores for all nodes based on connectivity.
 
     Importance = normalized(in_degree + 0.5 * out_degree + type_weight)
+
+    Uses bulk SQL queries to avoid N+1 round-trips to SQLite.
     """
     type_weights = {
         NodeType.MODULE: 0.3,
@@ -25,27 +27,25 @@ def compute_importance(storage: Storage) -> None:
         NodeType.OTHER: 0.05,
     }
 
-    all_ids = storage.get_all_node_ids()
+    all_nodes = storage.get_all_nodes()
+    if not all_nodes:
+        return
+
+    degree_counts = storage.get_all_degree_counts()
     scores: dict[str, float] = {}
+    node_map: dict[str, NeuralNode] = {}
 
-    for nid in all_ids:
-        node = storage.get_node(nid)
-        if not node:
-            continue
-
-        in_edges = storage.get_edges_to(nid)
-        out_edges = storage.get_edges_from(nid)
-
+    for node in all_nodes:
+        node_map[node.id] = node
+        in_deg, out_deg = degree_counts.get(node.id, (0, 0))
         raw_score = (
-            len(in_edges) * 1.0 +
-            len(out_edges) * 0.5 +
+            in_deg * 1.0 +
+            out_deg * 0.5 +
             type_weights.get(node.node_type, 0.05)
         )
-        # Bonus for public API
         if node.is_public:
             raw_score *= 1.2
-
-        scores[nid] = raw_score
+        scores[node.id] = raw_score
 
     # Normalize to 0-1
     max_score = max(scores.values()) if scores else 1.0
@@ -53,10 +53,9 @@ def compute_importance(storage: Storage) -> None:
         max_score = 1.0
 
     for nid, raw in scores.items():
-        node = storage.get_node(nid)
-        if node:
-            node.importance = round(raw / max_score, 3)
-            storage.upsert_node(node)
+        node_map[nid].importance = round(raw / max_score, 3)
+
+    storage.batch_upsert_nodes(list(node_map.values()))
 
 
 def get_neighborhood(

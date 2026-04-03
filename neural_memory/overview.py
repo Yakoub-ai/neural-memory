@@ -49,7 +49,7 @@ def generate_project_overview(storage: "Storage") -> NeuralNode:
         [n for n in all_nodes if n.node_type == NodeType.MODULE],
         key=lambda n: n.importance, reverse=True
     )
-    top_module_names = [m.name.replace(".py", "") for m in modules[:6]]
+    top_module_names = [m.name.rsplit(".", 1)[0] if "." in m.name else m.name for m in modules[:6]]
 
     # Top classes / functions by importance
     top_entities = sorted(

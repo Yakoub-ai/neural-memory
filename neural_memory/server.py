@@ -297,7 +297,8 @@ async def neural_inspect(params: InspectInput) -> str:
 
         # Optionally include source
         if params.show_code and node.raw_code:
-            output += f"\n\n## Source Code\n```python\n{node.raw_code}\n```"
+            lang = node.language or "python"
+            output += f"\n\n## Source Code\n```{lang}\n{node.raw_code}\n```"
 
     return output
 

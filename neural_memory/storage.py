@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -112,6 +113,12 @@ class Storage:
         # Create category index after column is guaranteed to exist
         try:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_category ON nodes(category)")
+            self.conn.commit()
+        except Exception:
+            pass
+        # v2→v3: add language column to nodes table
+        try:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN language TEXT DEFAULT ''")
             self.conn.commit()
         except Exception:
             pass
@@ -354,6 +361,87 @@ class Storage:
         if row:
             return EmbeddingMeta.from_dict(json.loads(row["data"]))
         return None
+
+    # ── Batch operations ──
+
+    @contextmanager
+    def transaction(self):
+        """Wrap a block in a single SQLite transaction for batch performance."""
+        try:
+            yield
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def batch_upsert_nodes(self, nodes: list[NeuralNode]) -> None:
+        """Upsert multiple nodes in a single transaction."""
+        if not nodes:
+            return
+        with self.transaction():
+            self.conn.executemany(
+                """INSERT INTO nodes (id, name, node_type, file_path, line_start, line_end,
+                                      content_hash, importance, category, data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       name=excluded.name, node_type=excluded.node_type,
+                       file_path=excluded.file_path, line_start=excluded.line_start,
+                       line_end=excluded.line_end, content_hash=excluded.content_hash,
+                       importance=excluded.importance, category=excluded.category,
+                       data=excluded.data""",
+                [(n.id, n.name, n.node_type.value, n.file_path,
+                  n.line_start, n.line_end, n.content_hash,
+                  n.importance, n.category, json.dumps(n.to_dict()))
+                 for n in nodes]
+            )
+
+    def batch_upsert_edges(self, edges: list[NeuralEdge]) -> None:
+        """Upsert multiple edges in a single transaction."""
+        if not edges:
+            return
+        with self.transaction():
+            self.conn.executemany(
+                """INSERT INTO edges (source_id, target_id, edge_type, context, weight)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(source_id, target_id, edge_type) DO UPDATE SET
+                       context=excluded.context, weight=excluded.weight""",
+                [(e.source_id, e.target_id, e.edge_type.value, e.context, e.weight)
+                 for e in edges]
+            )
+
+    def batch_save_file_hashes(self, entries: list[tuple[str, str, str]]) -> None:
+        """Save multiple file hashes in a single transaction.
+
+        Args:
+            entries: list of (file_path, content_hash, timestamp)
+        """
+        if not entries:
+            return
+        with self.transaction():
+            self.conn.executemany(
+                """INSERT INTO file_hashes (file_path, content_hash, last_indexed)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(file_path) DO UPDATE SET
+                       content_hash=excluded.content_hash,
+                       last_indexed=excluded.last_indexed""",
+                entries
+            )
+
+    def get_all_degree_counts(self) -> dict[str, tuple[int, int]]:
+        """Return {node_id: (in_degree, out_degree)} for all nodes in one query."""
+        rows = self.conn.execute("""
+            SELECT n.id,
+                   COALESCE(ein.cnt, 0) AS in_deg,
+                   COALESCE(eout.cnt, 0) AS out_deg
+            FROM nodes n
+            LEFT JOIN (
+                SELECT target_id, COUNT(*) AS cnt FROM edges GROUP BY target_id
+            ) ein ON ein.target_id = n.id
+            LEFT JOIN (
+                SELECT source_id, COUNT(*) AS cnt FROM edges GROUP BY source_id
+            ) eout ON eout.source_id = n.id
+        """).fetchall()
+        return {r["id"]: (r["in_deg"], r["out_deg"]) for r in rows}
 
     # ── Stats ──
 

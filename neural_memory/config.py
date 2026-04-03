@@ -39,14 +39,22 @@ class NeuralConfig:
     # Indexing mode
     index_mode: IndexMode = IndexMode.BOTH
     # File patterns
-    include_patterns: list[str] = field(default_factory=lambda: ["**/*.py"])
+    include_patterns: list[str] = field(default_factory=lambda: [
+        "**/*.py",
+        "**/*.ts", "**/*.tsx",
+        "**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs",
+        "**/*.go",
+        "**/*.rs",
+    ])
     exclude_patterns: list[str] = field(default_factory=lambda: [
         "**/__pycache__/**", "**/node_modules/**", "**/.venv/**",
         "**/venv/**", "**/.git/**", "**/dist/**", "**/build/**",
         "**/*.egg-info/**", "**/migrations/**",
-        # Neural memory storage directory — contains the index/DB/dashboard,
-        # not user source code; always exclude so it never appears in the graph.
         "**/.neural-memory/**",
+        "**/target/**",     # Rust/Java build output
+        "**/vendor/**",     # Go vendor directory
+        "**/.gradle/**",    # Java/Gradle
+        "**/bin/**", "**/obj/**",  # C# / .NET build output
     ])
     # Redaction
     redaction: RedactionConfig = field(default_factory=RedactionConfig)
@@ -85,14 +93,28 @@ def get_memory_dir(project_root: str = ".") -> Path:
     return p
 
 
+_LEGACY_PYTHON_ONLY = ["**/*.py"]
+
+
 def load_config(project_root: str = ".") -> NeuralConfig:
-    """Load config from disk or return defaults."""
+    """Load config from disk or return defaults.
+
+    If an existing config only has the legacy Python-only include pattern,
+    it is automatically expanded to the full multi-language set.
+    """
     config_path = get_memory_dir(project_root) / CONFIG_FILE
     if config_path.exists():
         with open(config_path, "r") as f:
             data = json.load(f)
         data["project_root"] = project_root
-        return NeuralConfig.from_dict(data)
+        cfg = NeuralConfig.from_dict(data)
+        # Auto-migrate legacy Python-only configs
+        if cfg.include_patterns == _LEGACY_PYTHON_ONLY:
+            cfg.include_patterns = NeuralConfig.__dataclass_fields__[
+                "include_patterns"
+            ].default_factory()
+            save_config(cfg)
+        return cfg
     cfg = NeuralConfig(project_root=project_root)
     save_config(cfg)
     return cfg

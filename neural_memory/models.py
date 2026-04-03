@@ -96,6 +96,8 @@ class NeuralNode:
     # ── Task-specific fields ──────────────────────────────────────────────────
     task_status: str = ""           # pending / in_progress / done
     priority: str = ""              # low / medium / high
+    # ── Language ──────────────────────────────────────────────────────────────
+    language: str = ""              # "python" | "typescript" | "go" | "rust" | ...
     # ── LSP-enrichment ────────────────────────────────────────────────────────
     lsp_type_info: str = ""         # resolved type signatures from hover
     lsp_diagnostics: list[str] = field(default_factory=list)

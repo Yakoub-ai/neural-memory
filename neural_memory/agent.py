@@ -16,6 +16,12 @@ from typing import Optional
 from .config import NeuralConfig, load_config, get_memory_dir, DB_FILE
 from .storage import Storage
 
+# All source file extensions tracked for staleness detection
+_SOURCE_EXTENSIONS = frozenset([
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+    ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".rb",
+])
+
 
 @dataclass
 class AgentReport:
@@ -63,7 +69,8 @@ def _git_changed_files_since(since_hash: str, project_root: str) -> list[str]:
             capture_output=True, text=True, cwd=project_root, timeout=5
         )
         if r.returncode == 0:
-            return [f for f in r.stdout.strip().split("\n") if f.strip() and f.endswith(".py")]
+            return [f for f in r.stdout.strip().split("\n")
+                    if f.strip() and any(f.endswith(ext) for ext in _SOURCE_EXTENSIONS)]
         return []
     except Exception:
         return []

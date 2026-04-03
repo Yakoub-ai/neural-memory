@@ -58,7 +58,8 @@ def _heuristic_detailed_summary(node: NeuralNode) -> str:
 
 def _build_api_prompt(node: NeuralNode, context_nodes: list[NeuralNode] = None) -> str:
     """Build the prompt for Claude API summary generation."""
-    prompt = f"""Analyze this Python code element and provide two summaries:
+    lang = node.language or "python"
+    prompt = f"""Analyze this code element and provide two summaries:
 
 1. SHORT SUMMARY (max 200 chars): A concise one-liner describing what this does.
 2. DETAILED SUMMARY (max 1000 chars): A thorough explanation covering:
@@ -72,12 +73,13 @@ Respond in JSON format:
 {{"short": "...", "detailed": "..."}}
 
 Code element ({node.node_type.value}): {node.name}
+Language: {lang}
 File: {node.file_path}
 Signature: {node.signature}
 Docstring: {node.docstring}
 
 Source code:
-```python
+```{lang}
 {node.raw_code[:3000]}
 ```
 """

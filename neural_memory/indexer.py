@@ -16,7 +16,8 @@ from .embeddings import compute_all_embeddings, update_embeddings, is_available 
 from .lsp_client import LSPClient, is_lsp_available
 from .models import NeuralNode, NeuralEdge, IndexMode, IndexState
 from .overview import generate_and_store_overviews
-from .parser import parse_file, resolve_edges
+from .parser import parse_file as _py_parse_file, resolve_edges
+from .parsers import get_parser as _get_parser
 from .redactor import Redactor
 from .storage import Storage
 from .summarizer import summarize_node
@@ -152,7 +153,13 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
     for rel_path in files:
         full_path = root / rel_path
         try:
-            nodes, edges = parse_file(str(rel_path), source=full_path.read_text(encoding="utf-8", errors="replace"))
+            source = full_path.read_text(encoding="utf-8", errors="replace")
+            parser = _get_parser(rel_path)
+            if parser:
+                nodes, edges = parser.parse_file(str(rel_path), source=source)
+            else:
+                # Fallback to Python parser for .py files without registry entry
+                nodes, edges = _py_parse_file(str(rel_path), source=source)
             for node in nodes:
                 all_nodes[node.id] = node
             all_edges.extend(edges)
@@ -180,21 +187,21 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
     with Storage(config.project_root) as storage:
         now = datetime.now(timezone.utc).isoformat()
 
-        for node in all_nodes.values():
-            storage.upsert_node(node)
-            stats["nodes_created"] += 1
+        storage.batch_upsert_nodes(list(all_nodes.values()))
+        stats["nodes_created"] += len(all_nodes)
 
-        for edge in all_edges:
-            storage.upsert_edge(edge)
-            stats["edges_created"] += 1
+        storage.batch_upsert_edges(all_edges)
+        stats["edges_created"] += len(all_edges)
 
-        # Save file hashes
+        # Save file hashes in one transaction
+        hash_entries: list[tuple[str, str, str]] = []
         for rel_path in files:
             try:
                 fh = _file_hash(rel_path, config.project_root)
-                storage.save_file_hash(rel_path, fh, now)
+                hash_entries.append((rel_path, fh, now))
             except Exception:
                 pass
+        storage.batch_save_file_hashes(hash_entries)
 
         # Phase 4.5: Import context logs (bugs, tasks, phases)
         try:
@@ -340,7 +347,11 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
 
                 # Re-parse
                 source = full_path.read_text(encoding="utf-8", errors="replace")
-                nodes, edges = parse_file(str(rel_path), source=source)
+                parser = _get_parser(rel_path)
+                if parser:
+                    nodes, edges = parser.parse_file(str(rel_path), source=source)
+                else:
+                    nodes, edges = _py_parse_file(str(rel_path), source=source)
 
                 # Resolve edges against all known nodes
                 for node in nodes:
@@ -357,12 +368,10 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
                             node.has_redacted_content = True
 
                 # Store
-                for node in nodes:
-                    storage.upsert_node(node)
-                    stats["nodes_updated"] += 1
+                storage.batch_upsert_nodes(nodes)
+                stats["nodes_updated"] += len(nodes)
 
-                for edge in edges:
-                    storage.upsert_edge(edge)
+                storage.batch_upsert_edges(edges)
 
                 # Update file hash
                 now = datetime.now(timezone.utc).isoformat()

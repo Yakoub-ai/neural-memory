@@ -70,7 +70,9 @@ def _find_code_nodes_for_file(storage: "Storage", file_path: str) -> list[Neural
 # em-dash (U+2014) is used in these log headings
 _GOTCHA_HEADING = re.compile(r"^## (\d{4}-\d{2}-\d{2}) \u2014 (.+)$", re.MULTILINE)
 _BOLD_KV = re.compile(r"\*\*(\w[\w\s]*?)\*\*:\s*(.+?)(?=\n\*\*|\n\n|$)", re.DOTALL)
-_BACKTICK_FILE = re.compile(r"`([^`]+\.py)(?::[:\d\-]+)?`")
+_BACKTICK_FILE = re.compile(
+    r"`([^`]+\.(?:py|ts|tsx|js|jsx|mjs|go|rs|java|c|cpp|h|hpp|cs|rb))(?::[:\d\-]+)?`"
+)
 
 
 def parse_gotchas(
@@ -152,7 +154,10 @@ _H1 = re.compile(r"^# (.+)$", re.MULTILINE)
 _TASK_HEADING = re.compile(r"^## (Fix \d+|Task \d+|Step \d+) \u2014 (.+)$", re.MULTILINE)
 _TASK_HEADING_GENERIC = re.compile(r"^## (.+?)(?:\s*\u2014\s*(.+))?$", re.MULTILINE)
 _STATUS_LINE = re.compile(r"\*\*Status\*\*:\s*\[([xX ])\]\s*(.+?)(?:\n|$)")
-_FILE_REF = re.compile(r"\*\*File\*\*:\s*`([^`]+\.py)`(?:\s+lines?\s+(\d+)[–\-]+(\d+))?")
+_FILE_REF = re.compile(
+    r"\*\*File\*\*:\s*`([^`]+\.(?:py|ts|tsx|js|jsx|mjs|go|rs|java|c|cpp|h|hpp|cs|rb))`"
+    r"(?:\s+lines?\s+(\d+)[–\-]+(\d+))?"
+)
 _OVERALL_STATUS = re.compile(r"##\s+Status:\s*(COMPLETE|IN PROGRESS|PENDING)", re.IGNORECASE)
 
 
