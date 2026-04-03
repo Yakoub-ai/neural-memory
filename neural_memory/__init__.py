@@ -1,3 +1,8 @@
 """Neural Memory — A knowledge graph for codebases, built for Claude Code."""
 
-__version__ = "0.4.0"
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("neural-memory-mcp")
+except PackageNotFoundError:
+    __version__ = "0.4.0"  # fallback when running from source without install

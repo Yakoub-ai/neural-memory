@@ -1,0 +1,12 @@
+# GitHub auto-release notes configuration
+# Groups PRs/commits by their conventional-commit prefix
+changelog:
+  exclude:
+    labels: [skip-changelog]
+  categories:
+    - title: "Features"
+      labels: [enhancement, feature]
+    - title: "Bug Fixes"
+      labels: [bug, fix]
+    - title: "Maintenance"
+      labels: [chore, refactor, docs, ci]

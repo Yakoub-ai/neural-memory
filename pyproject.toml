@@ -75,6 +75,11 @@ include = ["neural_memory*"]
 [tool.setuptools.package-data]
 neural_memory = ["py.typed"]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --tb=short"
+
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"

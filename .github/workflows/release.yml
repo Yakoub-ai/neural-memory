@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write    # create GitHub releases + tags
+  id-token: write    # PyPI trusted publishing (OIDC — no API key needed)
+
+jobs:
+  # ── 1. Verify version tag matches pyproject.toml ───────────────────────────
+  verify:
+    name: Verify version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches pyproject.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME}"                         # e.g. v0.4.0
+          PKG_VERSION="v$(python -c "
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")"
+          echo "Tag: $TAG  |  pyproject.toml: $PKG_VERSION"
+          if [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "ERROR: git tag ($TAG) does not match pyproject.toml version ($PKG_VERSION)"
+            exit 1
+          fi
+
+  # ── 2. Full test matrix ────────────────────────────────────────────────────
+  test:
+    name: Test Python ${{ matrix.python-version }}
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package + all extras + test deps
+        run: pip install -e ".[all,test]"
+
+      - name: Run tests
+        run: pytest tests/ -x -q --tb=short
+
+  # ── 3. Build ───────────────────────────────────────────────────────────────
+  build:
+    name: Build distribution
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ── 4. Publish to PyPI via trusted publishing ──────────────────────────────
+  #
+  # Setup required (one-time, on PyPI):
+  #   1. Go to https://pypi.org/manage/project/neural-memory-mcp/settings/publishing/
+  #   2. Add a "pending trusted publisher":
+  #        Owner:    Yakoub-ai
+  #        Repo:     neural-memory
+  #        Workflow: release.yml
+  #        Env:      pypi
+  #
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ── 5. Create GitHub Release with conventional-commit changelog ──────────
+  github-release:
+    name: Create GitHub Release
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history needed to find previous tag
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Generate release notes from conventional commits
+        id: notes
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -1)
+          echo "Previous tag: $PREV_TAG"
+
+          # Collect commits since previous tag (or all commits if first release)
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --pretty=format:"%s" --no-merges)
+          else
+            COMMITS=$(git log --pretty=format:"%s" --no-merges)
+          fi
+
+          FEATURES=""
+          FIXES=""
+          OTHER=""
+
+          while IFS= read -r line; do
+            case "$line" in
+              feat:*|feat\(*) FEATURES="${FEATURES}- ${line#feat: }\n" ;;
+              fix:*|fix\(*)   FIXES="${FIXES}- ${line#fix: }\n" ;;
+              *)               OTHER="${OTHER}- ${line}\n" ;;
+            esac
+          done <<< "$COMMITS"
+
+          NOTES="## What's Changed\n\n"
+          [ -n "$FEATURES" ] && NOTES="${NOTES}### Features\n${FEATURES}\n"
+          [ -n "$FIXES" ]    && NOTES="${NOTES}### Bug Fixes\n${FIXES}\n"
+          [ -n "$OTHER" ]    && NOTES="${NOTES}### Other Changes\n${OTHER}\n"
+          [ -n "$PREV_TAG" ] && NOTES="${NOTES}**Full changelog**: https://github.com/Yakoub-ai/neural-memory/compare/${PREV_TAG}...${GITHUB_REF_NAME}\n"
+
+          # Write to file (handles multi-line safely)
+          printf "%b" "$NOTES" > release_notes.md
+          echo "notes_file=release_notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: dist/*
+          make_latest: true
