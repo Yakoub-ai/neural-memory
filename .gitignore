@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.neural-memory/
+*.db
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Type checking / linting
+.mypy_cache/
+.ruff_cache/
+.pytype/

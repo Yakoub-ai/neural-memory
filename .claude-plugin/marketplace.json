@@ -1,0 +1,14 @@
+{
+  "name": "Yakoub-ai",
+  "owner": {
+    "name": "Yakoub-ai"
+  },
+  "plugins": [
+    {
+      "name": "neural-memory",
+      "source": "./",
+      "description": "Knowledge graph plugin — map your codebase into layered, navigable neural nodes for Claude Code",
+      "version": "0.1.0"
+    }
+  ]
+}

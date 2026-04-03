@@ -1,0 +1,11 @@
+{
+  "name": "neural-memory",
+  "description": "A knowledge graph that maps your codebase into layered, navigable neural nodes — understand any function without reading the entire file.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yakoub-ai"
+  },
+  "homepage": "https://github.com/Yakoub-ai/neural-memory",
+  "repository": "https://github.com/Yakoub-ai/neural-memory",
+  "license": "MIT"
+}

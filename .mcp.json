@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "neural-memory": {
+      "command": "neural-memory"
+    }
+  }
+}
