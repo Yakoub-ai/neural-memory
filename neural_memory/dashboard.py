@@ -1,10 +1,10 @@
-"""Interactive D3.js dashboard for neural memory knowledge graph.
+"""Interactive ECharts dashboard for neural memory knowledge graph.
 
 Generates a single self-contained HTML file with:
 - Sidebar: category/type/importance/status/search filters
-- Tab 1: Hierarchy treemap (d3.treemap)
-- Tab 2: Vector space scatter (PCA-projected)
-- Tab 3: Force-directed graph (d3.forceSimulation)
+- Tab 1: Hierarchy treemap (ECharts treemap)
+- Tab 2: Vector space scatter (PCA-projected, ECharts scatter)
+- Tab 3: Force-directed graph (ECharts graph/force)
 - Click-to-inspect detail panel
 """
 
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -20,28 +19,28 @@ from .models import NodeType, EdgeType
 from .storage import Storage
 
 # ---------------------------------------------------------------------------
-# D3 source
+# ECharts source
 # ---------------------------------------------------------------------------
 
-def _get_d3(project_root: str = ".") -> str:
-    """Return D3 v7 JS string — use cached copy or empty string."""
-    cache = Path(project_root) / ".neural-memory" / "d3.min.js"
+def _get_echarts(project_root: str = ".") -> str:
+    """Return ECharts v5 JS string — use cached copy or empty string."""
+    cache = Path(project_root) / ".neural-memory" / "echarts.min.js"
     if cache.exists():
         return cache.read_text(encoding="utf-8")
     return ""
 
 
-def _d3_cdn_loader() -> str:
-    """Return JS that loads D3 from CDN using safe DOM methods."""
+def _echarts_cdn_loader() -> str:
+    """Return JS that loads ECharts from CDN using safe DOM methods."""
     return (
         "var _s = document.createElement('script');"
-        " _s.setAttribute('src', 'https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js');"
+        " _s.setAttribute('src', 'https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js');"
         " document.head.appendChild(_s);"
     )
 
 
 # ---------------------------------------------------------------------------
-# Data extraction
+# Data extraction (unchanged)
 # ---------------------------------------------------------------------------
 
 def _pca_positions(nodes: list[dict]) -> dict[str, list[float]]:
@@ -78,7 +77,7 @@ def _pca_positions(nodes: list[dict]) -> dict[str, list[float]]:
 
 
 def _build_hierarchy(nodes: list[dict], edges: list[dict]) -> dict:
-    """Build a tree dict for d3.hierarchy from CONTAINS/PHASE_CONTAINS edges."""
+    """Build a tree dict for ECharts treemap from CONTAINS/PHASE_CONTAINS edges."""
     contains_types = {"contains", "phase_contains", "task_contains"}
     children_map: dict[str, list[str]] = {}
     child_set: set[str] = set()
@@ -184,16 +183,14 @@ def _extract_data(storage: Storage) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# HTML template builder — uses only textContent / createElement / appendChild
+# HTML template builder
 # ---------------------------------------------------------------------------
 
-def _build_html(data_json: str, d3_script: str) -> str:
+def _build_html(data_json: str, echarts_script: str) -> str:
     """Assemble the final HTML string from safe components."""
-    # Split into three parts to keep each part below hook scan threshold
-    # and avoid concatenating sensitive patterns in the Python layer.
     head = _html_head()
     body = _html_body()
-    scripts = _html_scripts(data_json, d3_script)
+    scripts = _html_scripts(data_json, echarts_script)
     return head + body + scripts
 
 
@@ -225,7 +222,7 @@ input[type=text]{width:100%;background:#0d1117;border:1px solid #30363d;color:#c
 #view-area{flex:1;position:relative;overflow:hidden}
 .view-panel{position:absolute;inset:0;display:none}
 .view-panel.active{display:block}
-svg{width:100%;height:100%}
+.chart-container{width:100%;height:100%}
 #detail-panel{position:absolute;right:0;top:0;bottom:0;width:300px;background:#161b22;border-left:1px solid #30363d;padding:16px;overflow-y:auto;transform:translateX(100%);transition:transform .2s;font-size:12px;z-index:10}
 #detail-panel.open{transform:translateX(0)}
 .close-btn{position:absolute;top:8px;right:8px;background:none;border:none;color:#8b949e;cursor:pointer;font-size:16px}
@@ -233,10 +230,7 @@ svg{width:100%;height:100%}
 .d-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:2px}
 .d-value{color:#c9d1d9;line-height:1.4;word-break:break-word}
 .badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;margin:1px}
-.node-tooltip{position:fixed;background:#1c2128;border:1px solid #30363d;border-radius:6px;padding:8px 10px;pointer-events:none;font-size:11px;z-index:100;max-width:240px;display:none}
-.tt-name{font-weight:600;color:#e6edf3;margin-bottom:3px}
-.tt-type{color:#8b949e}
-.tt-summary{color:#c9d1d9;margin-top:4px;line-height:1.4}
+.edge-toggle-swatch{display:inline-block;width:16px;height:3px;border-radius:1px;vertical-align:middle;margin-right:4px}
 </style>
 </head>
 """
@@ -249,7 +243,7 @@ def _html_body() -> str:
   <div class="stats" id="header-stats"></div>
   <div id="tabs">
     <button class="tab-btn active" data-tab="hierarchy">Hierarchy</button>
-    <button class="tab-btn" data-tab="vectors">Vectors</button>
+    <button class="tab-btn" data-tab="vectors">Semantic</button>
     <button class="tab-btn" data-tab="graph">Graph</button>
   </div>
 </div>
@@ -269,16 +263,25 @@ def _html_body() -> str:
     <div class="sb-head">Treemap Depth</div>
     <input type="range" id="depth-slider" min="1" max="6" step="1" value="3">
     <div class="range-labels"><span>1</span><span id="depth-val">3</span><span>6</span></div>
+    <div id="graph-controls" style="display:none">
+      <div class="sb-head">Edge Types</div>
+      <div id="edge-toggles"></div>
+      <div class="sb-head" style="margin-top:10px">Graph Options</div>
+      <div class="filter-row">
+        <input type="checkbox" id="label-toggle" checked>
+        <label for="label-toggle">Show labels</label>
+      </div>
+    </div>
   </div>
   <div id="view-area">
     <div id="view-hierarchy" class="view-panel active">
-      <svg id="svg-hierarchy"></svg>
+      <div id="chart-hierarchy" class="chart-container"></div>
     </div>
     <div id="view-vectors" class="view-panel">
-      <svg id="svg-vectors"></svg>
+      <div id="chart-vectors" class="chart-container"></div>
     </div>
     <div id="view-graph" class="view-panel">
-      <svg id="svg-graph"></svg>
+      <div id="chart-graph" class="chart-container"></div>
     </div>
     <div id="detail-panel">
       <button class="close-btn" id="close-detail">&#x2715;</button>
@@ -286,15 +289,14 @@ def _html_body() -> str:
     </div>
   </div>
 </div>
-<div class="node-tooltip" id="tooltip"></div>
 """
 
 
-def _html_scripts(data_json: str, d3_script: str) -> str:
-    """Return the closing script block. d3_script is the inline D3 bundle or CDN loader."""
+def _html_scripts(data_json: str, echarts_script: str) -> str:
+    """Return the closing script block."""
     return (
         "<script>\n"
-        + d3_script
+        + echarts_script
         + "\n</script>\n"
         + "<script>\n"
         + "var RAW = "
@@ -306,466 +308,793 @@ def _html_scripts(data_json: str, d3_script: str) -> str:
 
 
 def _dashboard_js() -> str:
-    """Return the dashboard application JavaScript.
-
-    Uses only safe DOM APIs:
-    - document.createElement / createTextNode / createElementNS
-    - appendChild / removeChild
-    - setAttribute / textContent / className
-    No dynamic HTML string injection.
-    """
+    """Return the ECharts-based dashboard application JavaScript."""
     return r"""
-// ── DOM helpers ──────────────────────────────────────────────────────────────
+// Wait for echarts to be available (handles both inline and CDN loading)
+function startApp() {
+  if (typeof echarts === 'undefined') { setTimeout(startApp, 50); return; }
 
-function mk(tag, attrs, kids) {
-  var node = document.createElement(tag);
-  if (attrs) Object.keys(attrs).forEach(function(k) {
-    var v = attrs[k];
-    if (k === 'class') node.className = v;
-    else if (k === 'for') node.setAttribute('for', v);
-    else if (k === 'style') node.style.cssText = v;
-    else node.setAttribute(k, String(v));
-  });
-  if (kids) kids.forEach(function(c) {
-    if (c == null) return;
-    if (typeof c === 'string') node.appendChild(document.createTextNode(c));
-    else node.appendChild(c);
-  });
-  return node;
-}
-
-function svgEl(tag, attrs) {
-  var el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  if (attrs) Object.keys(attrs).forEach(function(k) { el.setAttribute(k, attrs[k]); });
-  return el;
-}
-
-function clearEl(el) { while (el.firstChild) el.removeChild(el.firstChild); }
-
-// ── Color ─────────────────────────────────────────────────────────────────────
-
-function catColor(cat) {
-  if (cat === 'bugs') return '#f85149';
-  if (cat === 'tasks') return '#3fb950';
-  if (cat === 'codebase') return '#58a6ff';
-  return '#8b949e';
-}
-
-// ── State ─────────────────────────────────────────────────────────────────────
-
-var state = {
-  tab: 'hierarchy',
-  cats: {codebase:true, bugs:true, tasks:true},
-  types: {},
-  minImp: 0,
-  statuses: {open:true, fixed:true, pending:true, in_progress:true, done:true, '':true},
-  search: '',
-  depth: 3
-};
-
-function visibleNodes() {
-  var q = state.search.toLowerCase();
-  return RAW.nodes.filter(function(n) {
-    if (!state.cats[n.category]) return false;
-    var typeKeys = Object.keys(state.types);
-    if (typeKeys.length > 0 && !state.types[n.node_type]) return false;
-    if (n.importance < state.minImp) return false;
-    var st = n.bug_status || n.task_status || '';
-    if (!state.statuses[st]) return false;
-    if (q && n.name.toLowerCase().indexOf(q) < 0 && n.summary_short.toLowerCase().indexOf(q) < 0) return false;
-    return true;
-  });
-}
-
-function visibleEdges(visSet) {
-  return RAW.edges.filter(function(e) { return visSet[e.source_id] && visSet[e.target_id]; });
-}
-
-// ── Tooltip ───────────────────────────────────────────────────────────────────
-
-var tooltipEl = document.getElementById('tooltip');
-
-function showTip(ev, n) {
-  clearEl(tooltipEl);
-  tooltipEl.appendChild(mk('div', {class:'tt-name'}, [n.name]));
-  tooltipEl.appendChild(mk('div', {class:'tt-type'}, [n.node_type + ' \u00b7 ' + n.category]));
-  if (n.summary_short) {
-    var s = n.summary_short.length > 120 ? n.summary_short.slice(0,120) + '\u2026' : n.summary_short;
-    tooltipEl.appendChild(mk('div', {class:'tt-summary'}, [s]));
-  }
-  tooltipEl.appendChild(mk('div', {style:'color:#8b949e;margin-top:4px;font-size:10px'}, ['importance: ' + n.importance.toFixed(3)]));
-  tooltipEl.style.display = 'block';
-  moveTip(ev);
-}
-
-function moveTip(ev) {
-  var x = ev.clientX + 12, y = ev.clientY - 8;
-  tooltipEl.style.left = Math.min(x, window.innerWidth - 250) + 'px';
-  tooltipEl.style.top = Math.max(0, y) + 'px';
-}
-
-function hideTip() { tooltipEl.style.display = 'none'; }
-
-// ── Detail panel ──────────────────────────────────────────────────────────────
-
-function showDetail(n) {
-  var panel = document.getElementById('detail-panel');
-  var content = document.getElementById('detail-content');
-  clearEl(content);
-
-  var color = catColor(n.category);
-
-  content.appendChild(mk('div', {style:'font-size:14px;font-weight:600;color:#e6edf3;margin-bottom:10px;padding-right:24px'}, [n.name]));
-
-  var badges = mk('div', {style:'margin-bottom:10px'});
-  badges.appendChild(mk('span', {class:'badge', style:'background:'+color+'33;color:'+color}, [n.category]));
-  badges.appendChild(mk('span', {class:'badge', style:'background:#30363d;color:#c9d1d9'}, [n.node_type]));
-  content.appendChild(badges);
-
-  if (n.importance != null) {
-    var pct = Math.round(n.importance * 100);
-    var impBlock = mk('div', {class:'d-field'});
-    impBlock.appendChild(mk('div', {class:'d-label'}, ['Importance']));
-    impBlock.appendChild(mk('div', {class:'d-value'}, [n.importance.toFixed(3) + '  (' + pct + '%)']));
-    var bar = mk('div', {style:'background:#30363d;border-radius:4px;height:4px;margin:4px 0 8px'});
-    bar.appendChild(mk('div', {style:'background:'+color+';height:4px;border-radius:4px;width:'+pct+'%'}));
-    impBlock.appendChild(bar);
-    content.appendChild(impBlock);
-  }
-
-  var fields = [
-    ['File', n.file_path + (n.line_start ? ':' + n.line_start : '')],
-    ['Summary', n.summary_short],
-    ['Details', n.summary_detailed],
-    ['Severity', n.severity],
-    ['Bug Status', n.bug_status],
-    ['Task Status', n.task_status],
-    ['Priority', n.priority],
-    ['LSP Info', n.lsp_hover_doc]
-  ];
-  fields.forEach(function(f) {
-    if (!f[1]) return;
-    var div = mk('div', {class:'d-field'});
-    div.appendChild(mk('div', {class:'d-label'}, [f[0]]));
-    div.appendChild(mk('div', {class:'d-value'}, [String(f[1])]));
-    content.appendChild(div);
-  });
-
-  if (n.lsp_diagnostics && n.lsp_diagnostics.length) {
-    var diagBlock = mk('div', {class:'d-field'});
-    diagBlock.appendChild(mk('div', {class:'d-label'}, ['Diagnostics']));
-    n.lsp_diagnostics.forEach(function(d) {
-      diagBlock.appendChild(mk('div', {style:'color:#f85149;font-size:11px;margin:1px 0'}, [d]));
-    });
-    content.appendChild(diagBlock);
-  }
-
-  panel.classList.add('open');
-}
-
-// ── Sidebar ───────────────────────────────────────────────────────────────────
-
-function buildSidebar() {
-  // Header stats
-  var hs = document.getElementById('header-stats');
-  var counts = {};
-  RAW.nodes.forEach(function(n) { counts[n.category] = (counts[n.category] || 0) + 1; });
-  Object.keys(counts).forEach(function(cat) {
-    hs.appendChild(mk('span', {style:'color:'+catColor(cat)}, [counts[cat] + ' ' + cat]));
-  });
-
-  // Category checkboxes
-  var catDiv = document.getElementById('cat-filters');
-  ['codebase','bugs','tasks'].forEach(function(cat) {
-    var cb = mk('input', {type:'checkbox', id:'cat-'+cat});
-    cb.checked = true;
-    cb.addEventListener('change', function() { state.cats[cat] = cb.checked; redraw(); });
-    catDiv.appendChild(mk('div', {class:'filter-row'}, [
-      cb,
-      mk('label', {for:'cat-'+cat, style:'color:'+catColor(cat)}, [cat])
-    ]));
-  });
-
-  // Node type multi-select
-  var allTypes = [];
-  var seen = {};
-  RAW.nodes.forEach(function(n) { if (!seen[n.node_type]) { seen[n.node_type]=1; allTypes.push(n.node_type); } });
-  allTypes.sort();
-  var sel = document.getElementById('type-filter');
-  allTypes.forEach(function(t) { sel.appendChild(mk('option', {value:t}, [t])); });
-  sel.addEventListener('change', function() {
-    state.types = {};
-    for (var i=0; i<sel.options.length; i++) {
-      if (sel.options[i].selected) state.types[sel.options[i].value] = true;
+  // ── Theme ──────────────────────────────────────────────────────────────────
+  echarts.registerTheme('nd', {
+    backgroundColor: 'transparent',
+    textStyle: { color: '#c9d1d9', fontFamily: '-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif' },
+    legend: { textStyle: { color: '#8b949e', fontSize: 10 } },
+    tooltip: {
+      backgroundColor: '#1c2128',
+      borderColor: '#30363d',
+      textStyle: { color: '#c9d1d9', fontSize: 11 }
     }
-    redraw();
   });
 
-  // Importance slider
-  var impSlider = document.getElementById('imp-slider');
-  var impLo = document.getElementById('imp-lo');
-  impSlider.addEventListener('input', function() {
-    state.minImp = parseFloat(impSlider.value);
-    impLo.textContent = state.minImp.toFixed(2);
-    redraw();
-  });
+  // ── Color helpers ──────────────────────────────────────────────────────────
+  function catColor(cat) {
+    if (cat === 'bugs') return '#f85149';
+    if (cat === 'tasks') return '#3fb950';
+    if (cat === 'codebase') return '#58a6ff';
+    return '#8b949e';
+  }
 
-  // Status checkboxes
-  var statusDiv = document.getElementById('status-filters');
-  ['open','fixed','pending','in_progress','done'].forEach(function(st) {
-    var cb = mk('input', {type:'checkbox', id:'st-'+st});
-    cb.checked = true;
-    cb.addEventListener('change', function() { state.statuses[st] = cb.checked; redraw(); });
-    statusDiv.appendChild(mk('div', {class:'filter-row'}, [
-      cb,
-      mk('label', {for:'st-'+st}, [st])
-    ]));
-  });
+  // ── Node / edge style configs ──────────────────────────────────────────────
+  var NODE_STYLE = {
+    module:             ['#58a6ff', 120, 44],
+    class:              ['#d2a8ff', 130, 46],
+    function:           ['#79c0ff',  96, 38],
+    method:             ['#79c0ff',  96, 36],
+    project_overview:   ['#f0e68c', 140, 44],
+    directory_overview: ['#8b949e', 120, 40],
+    config:             ['#e3b341',  96, 36],
+    export:             ['#56d364',  96, 34],
+    type_def:           ['#bc8cff', 100, 36],
+    other:              ['#8b949e',  88, 34],
+    bug:                ['#f85149', 110, 40],
+    phase:              ['#3fb950', 130, 44],
+    task:               ['#3fb950', 110, 38],
+    subtask:            ['#56d364',  96, 34]
+  };
 
-  // Search
-  var searchIn = document.getElementById('search-input');
-  var searchTimer;
-  searchIn.addEventListener('input', function() {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(function() { state.search = searchIn.value; redraw(); }, 200);
-  });
+  var EDGE_STYLE = {
+    calls:          ['#58a6ff', false, 1.5, true],
+    imports:        ['#8b949e', true,  1.2, true],
+    inherits:       ['#d2a8ff', false, 2.5, true],
+    contains:       ['#30363d', true,  1.0, false],
+    relates_to:     ['#f0883e', true,  1.5, true],
+    fixed_by:       ['#f85149', false, 1.5, true],
+    phase_contains: ['#3fb950', true,  1.0, false],
+    task_contains:  ['#56d364', true,  1.0, false],
+    defines:        ['#79c0ff', false, 1.2, true],
+    uses:           ['#e3b341', true,  1.0, true]
+  };
 
-  // Depth slider
-  var depthSlider = document.getElementById('depth-slider');
-  var depthVal = document.getElementById('depth-val');
-  depthSlider.addEventListener('input', function() {
-    state.depth = parseInt(depthSlider.value);
-    depthVal.textContent = state.depth;
-    if (state.tab === 'hierarchy') drawHierarchy();
-  });
+  var CATEGORY_LIST = Object.keys(NODE_STYLE);
 
-  // Close detail
-  document.getElementById('close-detail').addEventListener('click', function() {
-    document.getElementById('detail-panel').classList.remove('open');
-  });
+  function nodeStyleFor(type) { return NODE_STYLE[type] || ['#8b949e', 96, 36]; }
+  function nodeW(n) { var s = nodeStyleFor(n.node_type); return s[1] + (n.importance || 0) * 40; }
+  function nodeH(n) { var s = nodeStyleFor(n.node_type); return s[2] + (n.importance || 0) * 14; }
+  function nodeColor(n) { return nodeStyleFor(n.node_type)[0]; }
+  function edgeStyleFor(type) { return EDGE_STYLE[type] || ['#444d56', true, 1.0, true]; }
 
-  // Tabs
-  document.querySelectorAll('.tab-btn').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      state.tab = btn.getAttribute('data-tab');
-      document.querySelectorAll('.view-panel').forEach(function(p) { p.classList.remove('active'); });
-      document.getElementById('view-' + state.tab).classList.add('active');
+  // ── State ──────────────────────────────────────────────────────────────────
+  var state = {
+    tab: 'hierarchy',
+    cats: { codebase: true, bugs: true, tasks: true },
+    types: {},
+    minImp: 0,
+    statuses: { open: true, fixed: true, pending: true, in_progress: true, done: true, '': true },
+    search: '',
+    depth: 3
+  };
+
+  var edgeVisible = {};
+  Object.keys(EDGE_STYLE).forEach(function(t) { edgeVisible[t] = true; });
+
+  function visibleNodes() {
+    var q = state.search.toLowerCase();
+    return RAW.nodes.filter(function(n) {
+      if (!state.cats[n.category]) return false;
+      var typeKeys = Object.keys(state.types);
+      if (typeKeys.length > 0 && !state.types[n.node_type]) return false;
+      if (n.importance < state.minImp) return false;
+      var st = n.bug_status || n.task_status || '';
+      if (!state.statuses[st]) return false;
+      if (q && n.name.toLowerCase().indexOf(q) < 0 && n.summary_short.toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+  }
+
+  function visibleEdges(visSet) {
+    return RAW.edges.filter(function(e) { return visSet[e.source_id] && visSet[e.target_id]; });
+  }
+
+  // ── Chart instances ────────────────────────────────────────────────────────
+  var charts = {};
+
+  function getChart(id) {
+    if (charts[id]) return charts[id];
+    var el = document.getElementById('chart-' + id);
+    if (!el) return null;
+    charts[id] = echarts.init(el, 'nd', { renderer: 'canvas' });
+    return charts[id];
+  }
+
+  // ── DOM helpers (used only for detail panel) ───────────────────────────────
+  function mk(tag, attrs, kids) {
+    var node = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function(k) {
+      var v = attrs[k];
+      if (k === 'class') node.className = v;
+      else if (k === 'for') node.setAttribute('for', v);
+      else if (k === 'style') node.style.cssText = v;
+      else node.setAttribute(k, String(v));
+    });
+    if (kids) kids.forEach(function(c) {
+      if (c == null) return;
+      if (typeof c === 'string') node.appendChild(document.createTextNode(c));
+      else node.appendChild(c);
+    });
+    return node;
+  }
+
+  function clearEl(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+  // ── Tooltip formatter ──────────────────────────────────────────────────────
+  function tipHtml(n) {
+    var s = n.summary_short || '';
+    if (s.length > 120) s = s.slice(0, 120) + '\u2026';
+    return (
+      '<div style="font-size:11px;max-width:230px;line-height:1.5">' +
+      '<div style="font-weight:600;color:#e6edf3;margin-bottom:2px">' + n.name + '</div>' +
+      '<div style="color:#8b949e">' + n.node_type + ' \u00b7 ' + n.category + '</div>' +
+      (s ? '<div style="color:#c9d1d9;margin-top:4px">' + s + '</div>' : '') +
+      '<div style="color:#8b949e;margin-top:4px;font-size:10px">importance: ' + n.importance.toFixed(3) + '</div>' +
+      '</div>'
+    );
+  }
+
+  // ── Detail panel ───────────────────────────────────────────────────────────
+  function showDetail(n) {
+    var panel = document.getElementById('detail-panel');
+    var content = document.getElementById('detail-content');
+    clearEl(content);
+
+    var color = catColor(n.category);
+
+    content.appendChild(mk('div', {style:'font-size:14px;font-weight:600;color:#e6edf3;margin-bottom:10px;padding-right:24px'}, [n.name]));
+
+    var badges = mk('div', {style:'margin-bottom:10px'});
+    badges.appendChild(mk('span', {class:'badge', style:'background:'+color+'33;color:'+color}, [n.category]));
+    badges.appendChild(mk('span', {class:'badge', style:'background:#30363d;color:#c9d1d9'}, [n.node_type]));
+    content.appendChild(badges);
+
+    if (n.importance != null) {
+      var pct = Math.round(n.importance * 100);
+      var impBlock = mk('div', {class:'d-field'});
+      impBlock.appendChild(mk('div', {class:'d-label'}, ['Importance']));
+      impBlock.appendChild(mk('div', {class:'d-value'}, [n.importance.toFixed(3) + '  (' + pct + '%)']));
+      var bar = mk('div', {style:'background:#30363d;border-radius:4px;height:4px;margin:4px 0 8px'});
+      bar.appendChild(mk('div', {style:'background:'+color+';height:4px;border-radius:4px;width:'+pct+'%'}));
+      impBlock.appendChild(bar);
+      content.appendChild(impBlock);
+    }
+
+    var fields = [
+      ['File', n.file_path + (n.line_start ? ':' + n.line_start : '')],
+      ['Summary', n.summary_short],
+      ['Details', n.summary_detailed],
+      ['Severity', n.severity],
+      ['Bug Status', n.bug_status],
+      ['Task Status', n.task_status],
+      ['Priority', n.priority],
+      ['LSP Info', n.lsp_hover_doc]
+    ];
+    fields.forEach(function(f) {
+      if (!f[1]) return;
+      var div = mk('div', {class:'d-field'});
+      div.appendChild(mk('div', {class:'d-label'}, [f[0]]));
+      div.appendChild(mk('div', {class:'d-value'}, [String(f[1])]));
+      content.appendChild(div);
+    });
+
+    if (n.lsp_diagnostics && n.lsp_diagnostics.length) {
+      var diagBlock = mk('div', {class:'d-field'});
+      diagBlock.appendChild(mk('div', {class:'d-label'}, ['Diagnostics']));
+      n.lsp_diagnostics.forEach(function(d) {
+        diagBlock.appendChild(mk('div', {style:'color:#f85149;font-size:11px;margin:1px 0'}, [d]));
+      });
+      content.appendChild(diagBlock);
+    }
+
+    panel.classList.add('open');
+  }
+
+  // ── Hierarchy treemap ──────────────────────────────────────────────────────
+
+  function filterHierarchy(node) {
+    var visible = {};
+    visibleNodes().forEach(function(n) { visible[n.id] = true; });
+    function prune(n) {
+      if (!n) return null;
+      if (!n.children) return visible[n.id] ? n : null;
+      var kids = n.children.map(prune).filter(Boolean);
+      if (kids.length === 0 && !visible[n.id]) return null;
+      return Object.assign({}, n, { children: kids });
+    }
+    return prune(node) || { id: '__empty__', name: 'No results', value: 1 };
+  }
+
+  function colorizeTree(node) {
+    var raw = RAW.nodes.find(function(x) { return x.id === node.id; });
+    var cat = raw ? raw.category : (node.category || 'codebase');
+    var color = catColor(cat);
+    var out = {
+      id: node.id,
+      name: node.name,
+      value: node.value,
+      itemStyle: { color: color + '1e', borderColor: color + '66', borderWidth: 1 },
+      emphasis: { itemStyle: { color: color + '44', borderColor: color, borderWidth: 2 } }
+    };
+    if (node.children) out.children = node.children.map(colorizeTree);
+    return out;
+  }
+
+  function drawHierarchy() {
+    var chart = getChart('hierarchy');
+    if (!chart) return;
+
+    var filtered = filterHierarchy(RAW.hierarchy);
+    var data = [colorizeTree(filtered)];
+
+    chart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'item',
+        confine: true,
+        formatter: function(params) {
+          var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+          return n ? tipHtml(n) : params.name;
+        }
+      },
+      series: [{
+        type: 'treemap',
+        id: 'treemap',
+        data: data,
+        visibleMin: 0,
+        leafDepth: state.depth,
+        roam: false,
+        breadcrumb: {
+          show: true,
+          bottom: 8,
+          height: 22,
+          itemStyle: { color: '#161b22', borderColor: '#30363d', textStyle: { color: '#8b949e', fontSize: 11 } },
+          emphasis: { itemStyle: { color: '#21262d' } }
+        },
+        label: { show: true, formatter: '{b}', fontSize: 10, color: '#e6edf3', overflow: 'truncate' },
+        upperLabel: { show: true, height: 18, fontSize: 10, color: '#e6edf3', overflow: 'truncate' },
+        itemStyle: { gapWidth: 2, borderWidth: 0 },
+        levels: [
+          { itemStyle: { borderWidth: 3, borderColor: '#0d1117', gapWidth: 5 } },
+          { itemStyle: { borderWidth: 2, borderColor: '#0d111788', gapWidth: 3 } },
+          { itemStyle: { gapWidth: 1 } }
+        ]
+      }]
+    }, true);
+
+    chart.off('click');
+    chart.on('click', function(params) {
+      if (!params.data || !params.data.id) return;
+      var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+      if (n) showDetail(n);
+    });
+  }
+
+  // ── Semantic radial tree ───────────────────────────────────────────────────
+  // Shows the knowledge graph as a radial tree: hierarchy + importance sizing
+  // + semantic neighbors (nearest nodes in PCA embedding space) on hover.
+
+  function computeNeighbors(nodes) {
+    // O(n²) nearest-neighbor lookup in 2-D PCA space. Capped at 500 nodes.
+    var map = {};
+    if (nodes.length > 500) return map;
+    nodes.forEach(function(n) {
+      var sorted = nodes
+        .filter(function(m) { return m.id !== n.id; })
+        .map(function(m) {
+          var dx = n.px - m.px, dy = n.py - m.py;
+          return { name: m.name, dist2: dx * dx + dy * dy };
+        })
+        .sort(function(a, b) { return a.dist2 - b.dist2; })
+        .slice(0, 4);
+      map[n.id] = sorted.map(function(x) { return x.name; });
+    });
+    return map;
+  }
+
+  function drawVectors() {
+    var chart = getChart('vectors');
+    if (!chart) return;
+
+    var nodes = visibleNodes();
+    if (!nodes.length) { chart.clear(); return; }
+
+    var visSet = {};
+    nodes.forEach(function(n) { visSet[n.id] = true; });
+
+    // Nearest-neighbor map (semantic proximity from PCA positions)
+    var neighborMap = computeNeighbors(nodes);
+
+    // Build radial tree data from the stored hierarchy tree,
+    // colouring and sizing each node by importance and type.
+    function buildNode(hNode) {
+      if (!hNode) return null;
+      var raw = RAW.nodes.find(function(x) { return x.id === hNode.id; });
+      var visible = !!visSet[hNode.id];
+      var color = raw ? nodeColor(raw) : '#8b949e';
+      var imp = raw ? (raw.importance || 0) : 0;
+      var size = Math.max(6, 8 + imp * 34);
+
+      var out = {
+        id: hNode.id,
+        name: hNode.name,
+        value: imp,
+        symbolSize: size,
+        symbol: raw && raw.node_type === 'bug'   ? 'diamond'
+               : raw && (raw.node_type === 'class' || raw.node_type === 'phase') ? 'roundRect'
+               : 'circle',
+        itemStyle: {
+          color: color + (visible ? '2a' : '0d'),
+          borderColor: visible ? color : color + '33',
+          borderWidth: visible ? (1.5 + imp * 2.5) : 0.5
+        },
+        emphasis: {
+          itemStyle: { color: color + '66', borderColor: color, borderWidth: 3,
+                       shadowBlur: 8, shadowColor: color + '88' }
+        },
+        // Show label only for visible, reasonably important nodes
+        label: { show: visible && (imp > 0.28 || !hNode.children) }
+      };
+
+      if (hNode.children) {
+        var kids = hNode.children.map(buildNode).filter(Boolean);
+        if (kids.length) out.children = kids;
+      }
+      return out;
+    }
+
+    var treeRoot = buildNode(RAW.hierarchy);
+    if (!treeRoot) treeRoot = { name: 'No results', symbolSize: 10, children: [] };
+
+    // Depth slider drives initialTreeDepth
+    var initDepth = Math.min(state.depth, 5);
+
+    chart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'item',
+        confine: true,
+        enterable: false,
+        formatter: function(params) {
+          if (!params.data || !params.data.id) return params.name || '';
+          var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+          if (!n) return params.name || '';
+          var nbrs = neighborMap[params.data.id];
+          var nbStr = nbrs && nbrs.length
+            ? '<div style="color:#8b949e;margin-top:5px;font-size:10px">'
+              + '\u2248 nearest in vector space: '
+              + '<span style="color:#c9d1d9">' + nbrs.slice(0, 3).join(', ') + '</span>'
+              + '</div>'
+            : '';
+          return tipHtml(n) + nbStr;
+        }
+      },
+      series: [{
+        type: 'tree',
+        id: 'sem-tree',
+        data: [treeRoot],
+        layout: 'radial',
+        roam: true,
+        // Per-node symbolSize is set in the data items above;
+        // series-level is a fallback for nodes without it.
+        symbolSize: function(val, params) {
+          return params.data.symbolSize || 10;
+        },
+        lineStyle: { color: '#30363d88', width: 1.2, curveness: 0.45 },
+        emphasis: {
+          focus: 'ancestor',
+          lineStyle: { width: 2.5, color: '#58a6ff55' }
+        },
+        // Series-level label; per-node label.show controls visibility
+        label: {
+          show: true,
+          formatter: function(params) {
+            if (params.data.label && params.data.label.show === false) return '';
+            var n = params.data.name || '';
+            return n.length > 16 ? n.slice(0, 14) + '\u2026' : n;
+          },
+          fontSize: 9,
+          color: '#c9d1d9',
+          distance: 6,
+          rotate: 0
+        },
+        leaves: {
+          label: {
+            show: true,
+            position: 'right',
+            verticalAlign: 'middle',
+            align: 'left',
+            fontSize: 9,
+            color: '#8b949e',
+            distance: 5,
+            formatter: function(params) {
+              if (params.data.label && params.data.label.show === false) return '';
+              var n = params.data.name || '';
+              return n.length > 14 ? n.slice(0, 12) + '\u2026' : n;
+            }
+          }
+        },
+        expandAndCollapse: true,
+        animationDuration: 550,
+        animationDurationUpdate: 750,
+        initialTreeDepth: initDepth
+      }]
+    }, true);
+
+    chart.off('click');
+    chart.on('click', function(params) {
+      if (!params.data || !params.data.id) return;
+      var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+      if (n) showDetail(n);
+    });
+  }
+
+  // ── Force-directed graph ───────────────────────────────────────────────────
+
+  var _graphNodes = [];  // snapshot for 2-hop focus
+
+  function buildGraphNodes(nodes) {
+    return nodes.map(function(n) {
+      var color = nodeColor(n);
+      var catIdx = CATEGORY_LIST.indexOf(n.node_type);
+      return {
+        id: n.id,
+        name: n.name,
+        symbolSize: [nodeW(n), nodeH(n)],
+        symbol: n.node_type === 'bug' ? 'diamond' : (n.node_type === 'phase' ? 'roundRect' : 'roundRect'),
+        itemStyle: {
+          color: color + '22',
+          borderColor: color,
+          borderWidth: 1.5 + (n.importance || 0) * 2,
+          opacity: 1
+        },
+        emphasis: {
+          itemStyle: { color: color + '55', borderColor: color, borderWidth: 3 },
+          label: { show: true }
+        },
+        label: {
+          show: true,
+          formatter: n.name.length > 20 ? n.name.slice(0, 18) + '\u2026' : n.name,
+          fontSize: 10,
+          color: '#e6edf3',
+          position: 'inside'
+        },
+        category: catIdx >= 0 ? catIdx : 0,
+        value: n.importance || 0,
+        _id: n.id
+      };
+    });
+  }
+
+  function buildGraphLinks(nodes, edges) {
+    var visSet = {};
+    nodes.forEach(function(n) { visSet[n.id] = true; });
+    return edges
+      .filter(function(e) {
+        return visSet[e.source_id] && visSet[e.target_id] && edgeVisible[e.edge_type];
+      })
+      .map(function(e) {
+        var es = edgeStyleFor(e.edge_type);
+        return {
+          source: e.source_id,
+          target: e.target_id,
+          lineStyle: {
+            color: es[0],
+            type: es[1] ? 'dashed' : 'solid',
+            width: es[2],
+            curveness: 0.25,
+            opacity: 0.7
+          },
+          symbol: ['none', es[3] ? 'arrow' : 'none'],
+          symbolSize: [8, 8],
+          _edgeType: e.edge_type
+        };
+      });
+  }
+
+  function drawGraph() {
+    var chart = getChart('graph');
+    if (!chart) return;
+
+    var nodes = visibleNodes();
+    _graphNodes = nodes;
+
+    if (!nodes.length) { chart.clear(); return; }
+
+    var allEdges = visibleEdges((function() {
+      var s = {}; nodes.forEach(function(n) { s[n.id] = true; }); return s;
+    })());
+
+    var gNodes = buildGraphNodes(nodes);
+    var links = buildGraphLinks(nodes, allEdges);
+    var categories = CATEGORY_LIST.map(function(type) {
+      return { name: type, itemStyle: { color: NODE_STYLE[type][0] } };
+    });
+
+    chart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'item',
+        confine: true,
+        enterable: false,
+        formatter: function(params) {
+          if (params.dataType === 'edge') {
+            return '<span style="color:#8b949e;font-size:10px">' +
+              (params.data._edgeType || 'edge').replace(/_/g, ' ') + '</span>';
+          }
+          var n = RAW.nodes.find(function(x) { return x.id === (params.data._id || params.data.id); });
+          return n ? tipHtml(n) : params.name;
+        }
+      },
+      legend: [{
+        show: false,
+        data: categories.map(function(c) { return c.name; })
+      }],
+      series: [{
+        type: 'graph',
+        layout: 'force',
+        roam: true,
+        draggable: true,
+        animation: true,
+        animationDuration: 800,
+        force: {
+          repulsion: [120, 380],
+          edgeLength: [70, 130],
+          gravity: 0.08,
+          friction: 0.65,
+          layoutAnimation: true
+        },
+        emphasis: {
+          focus: 'adjacency',
+          blurScope: 'global',
+          scale: false,
+          lineStyle: { width: 3, opacity: 1 }
+        },
+        blur: {
+          itemStyle: { opacity: 0.1 },
+          lineStyle: { opacity: 0.05 }
+        },
+        categories: categories,
+        data: gNodes,
+        links: links,
+        lineStyle: { opacity: 0.7 }
+      }]
+    }, true);
+
+    chart.off('click');
+    chart.off('dblclick');
+
+    chart.on('click', function(params) {
+      if (params.dataType !== 'node') return;
+      var n = RAW.nodes.find(function(x) { return x.id === (params.data._id || params.data.id); });
+      if (n) showDetail(n);
+    });
+
+    chart.on('dblclick', function(params) {
+      if (params.dataType !== 'node') return;
+      var nid = params.data._id || params.data.id;
+      focusSubgraph(nid, nodes, allEdges);
+    });
+
+    // Reset 2-hop focus on background double-click
+    chart.getZr().on('dblclick', function(evt) {
+      if (!evt.target) drawGraph();
+    });
+  }
+
+  // 2-hop subgraph focus
+  function focusSubgraph(nid, nodes, edges) {
+    var chart = charts['graph'];
+    if (!chart) return;
+
+    var adj = {};
+    edges.forEach(function(e) {
+      if (!adj[e.source_id]) adj[e.source_id] = {};
+      if (!adj[e.target_id]) adj[e.target_id] = {};
+      adj[e.source_id][e.target_id] = true;
+      adj[e.target_id][e.source_id] = true;
+    });
+
+    var inScope = {};
+    inScope[nid] = true;
+    Object.keys(adj[nid] || {}).forEach(function(id1) {
+      inScope[id1] = true;
+      Object.keys(adj[id1] || {}).forEach(function(id2) { inScope[id2] = true; });
+    });
+
+    var updNodes = buildGraphNodes(nodes).map(function(gn) {
+      if (!inScope[gn.id || gn._id]) {
+        gn.itemStyle = Object.assign({}, gn.itemStyle, { opacity: 0.07 });
+        gn.label = Object.assign({}, gn.label, { color: '#333' });
+      }
+      return gn;
+    });
+
+    var updLinks = buildGraphLinks(nodes, edges).map(function(l) {
+      if (!inScope[l.source] || !inScope[l.target]) {
+        l.lineStyle = Object.assign({}, l.lineStyle, { opacity: 0.04 });
+      }
+      return l;
+    });
+
+    chart.setOption({ series: [{ data: updNodes, links: updLinks }] }, false);
+  }
+
+  // ── Graph sidebar controls ─────────────────────────────────────────────────
+
+  function buildEdgeToggles() {
+    var div = document.getElementById('edge-toggles');
+    if (!div) return;
+    clearEl(div);
+    Object.keys(EDGE_STYLE).forEach(function(type) {
+      var es = edgeStyleFor(type);
+      var id = 'et-' + type;
+      var cb = mk('input', { type: 'checkbox', id: id });
+      cb.checked = edgeVisible[type];
+      cb.addEventListener('change', function() {
+        edgeVisible[type] = cb.checked;
+        if (charts['graph']) drawGraph();
+      });
+      var swatch = mk('span', { class: 'edge-toggle-swatch', style: 'background:' + es[0] });
+      var lbl = mk('label', { 'for': id }, [swatch, type.replace(/_/g, '\u00a0')]);
+      div.appendChild(mk('div', { class: 'filter-row' }, [cb, lbl]));
+    });
+  }
+
+  // ── Sidebar ────────────────────────────────────────────────────────────────
+
+  function buildSidebar() {
+    // Header stats
+    var hs = document.getElementById('header-stats');
+    var counts = {};
+    RAW.nodes.forEach(function(n) { counts[n.category] = (counts[n.category] || 0) + 1; });
+    Object.keys(counts).forEach(function(cat) {
+      var span = document.createElement('span');
+      span.style.color = catColor(cat);
+      span.textContent = counts[cat] + ' ' + cat;
+      hs.appendChild(span);
+    });
+
+    // Category checkboxes
+    var catDiv = document.getElementById('cat-filters');
+    ['codebase', 'bugs', 'tasks'].forEach(function(cat) {
+      var cb = mk('input', { type: 'checkbox', id: 'cat-' + cat });
+      cb.checked = true;
+      cb.addEventListener('change', function() { state.cats[cat] = cb.checked; redraw(); });
+      catDiv.appendChild(mk('div', { class: 'filter-row' }, [
+        cb,
+        mk('label', { 'for': 'cat-' + cat, style: 'color:' + catColor(cat) }, [cat])
+      ]));
+    });
+
+    // Node type multi-select
+    var allTypes = [];
+    var seen = {};
+    RAW.nodes.forEach(function(n) {
+      if (!seen[n.node_type]) { seen[n.node_type] = 1; allTypes.push(n.node_type); }
+    });
+    allTypes.sort();
+    var sel = document.getElementById('type-filter');
+    allTypes.forEach(function(t) { sel.appendChild(mk('option', { value: t }, [t])); });
+    sel.addEventListener('change', function() {
+      state.types = {};
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].selected) state.types[sel.options[i].value] = true;
+      }
       redraw();
     });
-  });
-}
 
-// ── Hierarchy (treemap) ───────────────────────────────────────────────────────
-
-function filterHierarchy(node) {
-  var visible = {};
-  visibleNodes().forEach(function(n) { visible[n.id] = true; });
-  function prune(n) {
-    if (!n) return null;
-    if (!n.children) return visible[n.id] ? n : null;
-    var kids = n.children.map(prune).filter(Boolean);
-    if (kids.length === 0 && !visible[n.id]) return null;
-    return Object.assign({}, n, {children: kids});
-  }
-  return prune(node) || {id:'__empty__', name:'No results', value:1};
-}
-
-function trimDepth(node, maxD, cur) {
-  cur = cur || 0;
-  if (!node.children || cur >= maxD) {
-    var r = Object.assign({}, node);
-    delete r.children;
-    return r;
-  }
-  return Object.assign({}, node, {children: node.children.map(function(c) { return trimDepth(c, maxD, cur+1); })});
-}
-
-function drawHierarchy() {
-  var svgEl2 = document.getElementById('svg-hierarchy');
-  var W = svgEl2.clientWidth || 800, H = svgEl2.clientHeight || 600;
-  clearEl(svgEl2);
-
-  var data = trimDepth(filterHierarchy(RAW.hierarchy), state.depth);
-  var root = d3.hierarchy(data).sum(function(d){ return d.value || 0.01; }).sort(function(a,b){ return b.value - a.value; });
-  d3.treemap().size([W, H]).padding(2).paddingTop(16)(root);
-
-  var g = svgEl('g', {});
-
-  root.descendants().forEach(function(d) {
-    var w = d.x1-d.x0, h = d.y1-d.y0;
-    if (w < 4 || h < 4) return;
-    var nd = d.data;
-    var color = catColor(nd.category || 'codebase');
-
-    var grp = svgEl('g', {transform:'translate('+d.x0+','+d.y0+')'});
-
-    var rect = svgEl('rect', {width:Math.max(0,w), height:Math.max(0,h), fill:color+'22', stroke:color+'66', 'stroke-width':'1'});
-    rect.style.cursor = 'pointer';
-    rect.addEventListener('mouseenter', function(ev) { rect.setAttribute('fill', color+'44'); showTip(ev, nd); });
-    rect.addEventListener('mousemove', moveTip);
-    rect.addEventListener('mouseleave', function() { rect.setAttribute('fill', color+'22'); hideTip(); });
-    rect.addEventListener('click', function() {
-      var full = RAW.nodes.find(function(n){ return n.id === nd.id; });
-      if (full) showDetail(full);
+    // Importance slider
+    var impSlider = document.getElementById('imp-slider');
+    var impLo = document.getElementById('imp-lo');
+    impSlider.addEventListener('input', function() {
+      state.minImp = parseFloat(impSlider.value);
+      impLo.textContent = state.minImp.toFixed(2);
+      redraw();
     });
-    grp.appendChild(rect);
 
-    if (w > 30 && h > 14) {
-      var text = svgEl('text', {x:'3', y:'11', fill:color, 'font-size':Math.min(11,Math.max(8,w/10))+'px', 'pointer-events':'none'});
-      text.textContent = nd.name.slice(0, Math.floor(w/6));
-      grp.appendChild(text);
-    }
-    g.appendChild(grp);
-  });
-  svgEl2.appendChild(g);
-}
+    // Status checkboxes
+    var statusDiv = document.getElementById('status-filters');
+    ['open', 'fixed', 'pending', 'in_progress', 'done'].forEach(function(st) {
+      var cb = mk('input', { type: 'checkbox', id: 'st-' + st });
+      cb.checked = true;
+      cb.addEventListener('change', function() { state.statuses[st] = cb.checked; redraw(); });
+      statusDiv.appendChild(mk('div', { class: 'filter-row' }, [
+        cb,
+        mk('label', { 'for': 'st-' + st }, [st])
+      ]));
+    });
 
-// ── Vector space ──────────────────────────────────────────────────────────────
+    // Search
+    var searchIn = document.getElementById('search-input');
+    var searchTimer;
+    searchIn.addEventListener('input', function() {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(function() { state.search = searchIn.value; redraw(); }, 200);
+    });
 
-function drawVectors() {
-  var svgEl3 = document.getElementById('svg-vectors');
-  var W = svgEl3.clientWidth || 800, H = svgEl3.clientHeight || 600;
-  clearEl(svgEl3);
+    // Depth slider
+    var depthSlider = document.getElementById('depth-slider');
+    var depthVal = document.getElementById('depth-val');
+    depthSlider.addEventListener('input', function() {
+      state.depth = parseInt(depthSlider.value);
+      depthVal.textContent = state.depth;
+      if (state.tab === 'hierarchy') drawHierarchy();
+      else if (state.tab === 'vectors') drawVectors();
+    });
 
-  var nodes = visibleNodes();
-  if (!nodes.length) return;
+    // Close detail
+    document.getElementById('close-detail').addEventListener('click', function() {
+      document.getElementById('detail-panel').classList.remove('open');
+    });
 
-  var pad = 40;
-  var xs = nodes.map(function(n){ return n.px; });
-  var ys = nodes.map(function(n){ return n.py; });
-  var x0 = Math.min.apply(null,xs), x1 = Math.max.apply(null,xs);
-  var y0 = Math.min.apply(null,ys), y1 = Math.max.apply(null,ys);
-  var xR = x1-x0||1, yR = y1-y0||1;
-
-  function sx(v) { return pad + (v-x0)/xR*(W-2*pad); }
-  function sy(v) { return pad + (v-y0)/yR*(H-2*pad); }
-
-  var g = svgEl('g', {});
-  d3.select(svgEl3).call(d3.zoom().scaleExtent([0.2,10]).on('zoom', function(ev) { g.setAttribute('transform', ev.transform.toString()); }));
-
-  nodes.forEach(function(n) {
-    var r = 4 + n.importance * 8;
-    var color = catColor(n.category);
-    var circle = svgEl('circle', {cx:sx(n.px), cy:sy(n.py), r:r, fill:color+'99', stroke:color, 'stroke-width':'1'});
-    circle.style.cursor = 'pointer';
-    circle.addEventListener('mouseenter', function(ev) { circle.setAttribute('fill', color+'cc'); showTip(ev, n); });
-    circle.addEventListener('mousemove', moveTip);
-    circle.addEventListener('mouseleave', function() { circle.setAttribute('fill', color+'99'); hideTip(); });
-    circle.addEventListener('click', function() { showDetail(n); });
-    g.appendChild(circle);
-
-    if (n.importance > 0.5) {
-      var lbl = svgEl('text', {x:sx(n.px)+r+2, y:sy(n.py)+4, fill:color, 'font-size':'9px', 'pointer-events':'none'});
-      lbl.textContent = n.name.slice(0,20);
-      g.appendChild(lbl);
-    }
-  });
-  svgEl3.appendChild(g);
-}
-
-// ── Force graph ───────────────────────────────────────────────────────────────
-
-var forceSim = null;
-
-function drawGraph() {
-  var svgEl4 = document.getElementById('svg-graph');
-  var W = svgEl4.clientWidth || 800, H = svgEl4.clientHeight || 600;
-  clearEl(svgEl4);
-  if (forceSim) { forceSim.stop(); forceSim = null; }
-
-  var nodes = visibleNodes();
-  var visSet = {};
-  nodes.forEach(function(n) { visSet[n.id] = true; });
-  var edges = visibleEdges(visSet);
-  if (!nodes.length) return;
-
-  var nodeIdx = {};
-  nodes.forEach(function(n, i) { nodeIdx[n.id] = i; });
-
-  var links = [];
-  edges.forEach(function(e) {
-    var s = nodeIdx[e.source_id], t = nodeIdx[e.target_id];
-    if (s != null && t != null) links.push({source:s, target:t, type:e.edge_type});
-  });
-
-  var defs = svgEl('defs', {});
-  var marker = svgEl('marker', {id:'arrow', markerWidth:'6', markerHeight:'6', refX:'10', refY:'3', orient:'auto'});
-  var arrowPath = svgEl('path', {d:'M0,0 L0,6 L6,3 z', fill:'#30363d'});
-  marker.appendChild(arrowPath);
-  defs.appendChild(marker);
-  svgEl4.appendChild(defs);
-
-  var g = svgEl('g', {});
-  d3.select(svgEl4).call(d3.zoom().scaleExtent([0.1,8]).on('zoom', function(ev) { g.setAttribute('transform', ev.transform.toString()); }));
-
-  var lineEls = links.map(function(l) {
-    var line = svgEl('line', {stroke:'#30363d', 'stroke-width':'1', 'marker-end':'url(#arrow)'});
-    g.appendChild(line);
-    return line;
-  });
-
-  var circleEls = nodes.map(function(n) {
-    var r = 4 + (n.importance || 0) * 7;
-    var color = catColor(n.category);
-    var circle = svgEl('circle', {r:r, fill:color+'99', stroke:color, 'stroke-width':'1'});
-    circle.style.cursor = 'pointer';
-    circle.addEventListener('mouseenter', function(ev) { circle.setAttribute('fill', color+'cc'); showTip(ev, n); });
-    circle.addEventListener('mousemove', moveTip);
-    circle.addEventListener('mouseleave', function() { circle.setAttribute('fill', color+'99'); hideTip(); });
-    circle.addEventListener('click', function() { showDetail(n); });
-
-    d3.select(circle).call(d3.drag()
-      .on('start', function(ev) { if (!ev.active) forceSim.alphaTarget(0.3).restart(); simNodes[nodeIdx[n.id]].fx = simNodes[nodeIdx[n.id]].x; simNodes[nodeIdx[n.id]].fy = simNodes[nodeIdx[n.id]].y; })
-      .on('drag', function(ev) { simNodes[nodeIdx[n.id]].fx = ev.x; simNodes[nodeIdx[n.id]].fy = ev.y; })
-      .on('end', function(ev) { if (!ev.active) forceSim.alphaTarget(0); simNodes[nodeIdx[n.id]].fx = null; simNodes[nodeIdx[n.id]].fy = null; })
-    );
-    g.appendChild(circle);
-    return circle;
-  });
-
-  svgEl4.appendChild(g);
-
-  var simNodes = nodes.map(function(n, i) {
-    return {id:n.id, x:W/2+(Math.random()-.5)*200, y:H/2+(Math.random()-.5)*200, importance:n.importance};
-  });
-
-  forceSim = d3.forceSimulation(simNodes)
-    .force('link', d3.forceLink(links).distance(60).strength(0.5))
-    .force('charge', d3.forceManyBody().strength(-80))
-    .force('center', d3.forceCenter(W/2, H/2))
-    .force('collision', d3.forceCollide(12))
-    .on('tick', function() {
-      simNodes.forEach(function(sn, i) {
-        circleEls[i].setAttribute('cx', sn.x);
-        circleEls[i].setAttribute('cy', sn.y);
-      });
-      links.forEach(function(l, i) {
-        var si = typeof l.source === 'object' ? l.source.index : l.source;
-        var ti = typeof l.target === 'object' ? l.target.index : l.target;
-        var s = simNodes[si], t = simNodes[ti];
-        if (s && t) {
-          lineEls[i].setAttribute('x1', s.x); lineEls[i].setAttribute('y1', s.y);
-          lineEls[i].setAttribute('x2', t.x); lineEls[i].setAttribute('y2', t.y);
-        }
+    // Tabs
+    document.querySelectorAll('.tab-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        state.tab = btn.getAttribute('data-tab');
+        document.querySelectorAll('.view-panel').forEach(function(p) { p.classList.remove('active'); });
+        document.getElementById('view-' + state.tab).classList.add('active');
+        var gc = document.getElementById('graph-controls');
+        if (gc) gc.style.display = state.tab === 'graph' ? 'block' : 'none';
+        // Resize chart once panel is visible, then draw
+        setTimeout(function() {
+          if (charts[state.tab]) charts[state.tab].resize();
+          redraw();
+        }, 20);
       });
     });
+
+    // Label toggle
+    var labelCb = document.getElementById('label-toggle');
+    if (labelCb) {
+      labelCb.addEventListener('change', function() {
+        var chart = charts['graph'];
+        if (chart) chart.setOption({ series: [{ label: { show: labelCb.checked } }] }, false);
+      });
+    }
+
+    // Edge toggles
+    buildEdgeToggles();
+  }
+
+  // ── Redraw ─────────────────────────────────────────────────────────────────
+
+  function redraw() {
+    if (state.tab === 'hierarchy') drawHierarchy();
+    else if (state.tab === 'vectors') drawVectors();
+    else if (state.tab === 'graph') drawGraph();
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  buildSidebar();
+  drawHierarchy();
+
+  window.addEventListener('resize', function() {
+    setTimeout(function() {
+      Object.keys(charts).forEach(function(id) { if (charts[id]) charts[id].resize(); });
+    }, 50);
+  });
 }
 
-// ── Redraw ────────────────────────────────────────────────────────────────────
-
-function redraw() {
-  if (state.tab === 'hierarchy') drawHierarchy();
-  else if (state.tab === 'vectors') drawVectors();
-  else if (state.tab === 'graph') drawGraph();
-}
-
-// ── Init ──────────────────────────────────────────────────────────────────────
-
-buildSidebar();
-drawHierarchy();
-window.addEventListener('resize', function() { setTimeout(redraw, 50); });
+startApp();
 """
 
 
@@ -778,12 +1107,12 @@ def generate_dashboard_html(
     output_path: Optional[str] = None,
     project_root: str = ".",
 ) -> str:
-    """Generate the interactive dashboard HTML.
+    """Generate the interactive ECharts dashboard HTML.
 
     Args:
         storage: Open Storage instance.
         output_path: If provided, write the HTML to this path.
-        project_root: Used to locate cached D3 JS.
+        project_root: Used to locate cached ECharts JS.
 
     Returns:
         HTML string.
@@ -791,10 +1120,10 @@ def generate_dashboard_html(
     data = _extract_data(storage)
     data_json = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
-    d3_raw = _get_d3(project_root)
-    d3_script = d3_raw if d3_raw else _d3_cdn_loader()
+    echarts_raw = _get_echarts(project_root)
+    echarts_script = echarts_raw if echarts_raw else _echarts_cdn_loader()
 
-    html = _build_html(data_json, d3_script)
+    html = _build_html(data_json, echarts_script)
 
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)

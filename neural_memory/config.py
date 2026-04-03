@@ -44,6 +44,9 @@ class NeuralConfig:
         "**/__pycache__/**", "**/node_modules/**", "**/.venv/**",
         "**/venv/**", "**/.git/**", "**/dist/**", "**/build/**",
         "**/*.egg-info/**", "**/migrations/**",
+        # Neural memory storage directory — contains the index/DB/dashboard,
+        # not user source code; always exclude so it never appears in the graph.
+        "**/.neural-memory/**",
     ])
     # Redaction
     redaction: RedactionConfig = field(default_factory=RedactionConfig)

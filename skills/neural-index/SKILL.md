@@ -1,3 +1,8 @@
+---
+name: neural-index
+description: Build the complete neural memory knowledge graph for this codebase by parsing AST, resolving relationships, and scoring importance.
+---
+
 # Neural Memory — Full Index
 
 Build the complete neural memory knowledge graph for this codebase.

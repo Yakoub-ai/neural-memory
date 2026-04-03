@@ -1,3 +1,8 @@
+---
+name: neural-update
+description: Sync neural memory with recent code changes incrementally without a full re-index.
+---
+
 # Neural Memory — Incremental Update
 
 Sync neural memory with recent code changes without a full re-index.

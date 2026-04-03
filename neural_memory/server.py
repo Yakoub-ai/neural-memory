@@ -484,6 +484,91 @@ async def neural_visualize_dashboard(params: DashboardInput) -> str:
     )
 
 
+class ServeInput(BaseModel):
+    """Input for neural_serve."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    project_root: str = Field(default=".", description="Project root directory")
+    port: int = Field(default=7891, description="Port to listen on (default: 7891)")
+    open_browser: bool = Field(default=True, description="Open dashboard in browser automatically")
+    regenerate: bool = Field(default=True, description="Regenerate dashboard HTML before serving")
+
+
+@mcp.tool(
+    name="neural_serve",
+    annotations={
+        "title": "Neural Memory — Start Dashboard Server",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_serve(params: ServeInput) -> str:
+    """Start a local HTTP server and open the neural memory dashboard in your browser.
+
+    Regenerates the dashboard HTML from the current index, then serves it at
+    http://localhost:PORT/dashboard.html and opens the URL in the default browser.
+
+    Idempotent: calling again while the server is already running on the same port
+    just re-opens the browser tab. Call neural_stop_serve to shut it down.
+    """
+    from .serve import start_server, is_running, get_url
+
+    memory_dir = get_memory_dir(params.project_root)
+    out_path = str(memory_dir / "dashboard.html")
+
+    if params.regenerate:
+        with Storage(params.project_root) as storage:
+            generate_dashboard_html(
+                storage,
+                output_path=out_path,
+                project_root=params.project_root,
+            )
+
+    url = start_server(
+        project_root=params.project_root,
+        port=params.port,
+        open_browser=params.open_browser,
+    )
+
+    return (
+        "# Neural Memory Dashboard\n\n"
+        f"**URL**: <{url}>\n\n"
+        f"Serving `.neural-memory/` on port **{params.port}**.\n\n"
+        "The dashboard opens automatically in your default browser.\n\n"
+        "**Views**: Hierarchy treemap · Semantic radial tree · Force-directed graph\n"
+        "**Filters**: Category · Node type · Importance · Status · Search\n\n"
+        "Run `neural_stop_serve` to shut down the server."
+    )
+
+
+class StopServeInput(BaseModel):
+    """Input for neural_stop_serve (no required fields)."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+
+@mcp.tool(
+    name="neural_stop_serve",
+    annotations={
+        "title": "Neural Memory — Stop Dashboard Server",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_stop_serve(params: StopServeInput) -> str:
+    """Stop the running neural memory dashboard HTTP server."""
+    from .serve import stop_server, is_running, get_url
+
+    url = get_url()
+    stopped = stop_server()
+
+    if stopped:
+        return f"Dashboard server stopped (was running at {url})."
+    return "No dashboard server is currently running."
+
+
 class AddBugInput(BaseModel):
     """Input for manually adding a bug node."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")

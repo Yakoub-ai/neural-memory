@@ -208,7 +208,7 @@ def cmd_install() -> None:
 
     # 3. Slash commands
     print("Install slash commands to current project?")
-    print("  (copies 6 neural-memory commands to .claude/commands/)")
+    print("  (copies 8 neural-memory commands to .claude/commands/)")
     if input("  [y/N] > ").strip().lower() == "y":
         n = _install_skills(project_root)
         print(f"  [OK] Installed {n} commands to .claude/commands/\n")

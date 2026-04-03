@@ -1,3 +1,8 @@
+---
+name: neural-query
+description: Search the neural knowledge graph for functions, classes, modules, or concepts and get layered results with summaries.
+---
+
 # Neural Memory — Query
 
 Search the neural knowledge graph for functions, classes, modules, or concepts.

@@ -1,3 +1,8 @@
+---
+name: neural-status
+description: Check the health and freshness of the neural memory index — initialization state, staleness, and graph statistics.
+---
+
 # Neural Memory — Status Check
 
 Check the health and freshness of the neural memory index.

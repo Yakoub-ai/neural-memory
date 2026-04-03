@@ -1,3 +1,8 @@
+---
+name: neural-config
+description: View and modify neural memory settings — indexing mode, exclusions, redaction patterns, and staleness thresholds.
+---
+
 # Neural Memory — Configuration
 
 View and modify neural memory settings.

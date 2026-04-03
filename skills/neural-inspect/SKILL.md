@@ -1,3 +1,8 @@
+---
+name: neural-inspect
+description: Deep-dive into a specific code element — see its full context, callers, callees, siblings, and call chains in the knowledge graph.
+---
+
 # Neural Memory — Deep Inspect
 
 Deep-dive into a specific code element — see its full context in the knowledge graph.
