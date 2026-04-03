@@ -3,27 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
 
-from .agent import check_staleness, format_agent_report
-from .config import load_config, save_config, NeuralConfig, RedactionConfig, get_memory_dir
-from .context_parser import parse_gotchas, parse_tasks
-from .embeddings import semantic_search, is_available as embeddings_available
-from .visualize import generate_hierarchy_html, generate_vector_space_html
-from .dashboard import generate_dashboard_html
-from .graph import (
-    get_neighborhood, format_neighborhood, format_node_summary,
-    trace_call_chain, compute_importance
-)
-from .indexer import full_index, incremental_update
-from .models import IndexMode, NodeType, NeuralNode, NeuralEdge, EdgeType, SummaryMode
-from .storage import Storage
-
 mcp = FastMCP("neural_memory_mcp")
+
+# Ensure library logging never writes to stdout (would corrupt stdio MCP transport)
+logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 
 # ── Input Models ──
@@ -113,6 +104,9 @@ async def neural_index(params: IndexInput) -> str:
 
     Use this on first run or when you want a fresh re-index.
     """
+    from .config import load_config, save_config
+    from .indexer import full_index
+    from .models import IndexMode
     config = load_config(params.project_root)
     if params.mode:
         config.index_mode = IndexMode(params.mode)
@@ -156,6 +150,7 @@ async def neural_update(params: UpdateInput) -> str:
     Only re-processes files that have changed since the last index,
     saving time and API tokens.
     """
+    from .indexer import incremental_update
     stats = incremental_update(project_root=params.project_root)
 
     lines = [
@@ -195,6 +190,9 @@ async def neural_query(params: QueryInput) -> str:
     Returns layered summaries — short overview first, with the ability to
     dig deeper using neural_inspect on any result.
     """
+    from .embeddings import semantic_search
+    from .graph import format_node_summary
+    from .storage import Storage
     with Storage(params.project_root) as storage:
         sem_results = semantic_search(storage, params.query, limit=params.limit)
 
@@ -259,6 +257,8 @@ async def neural_inspect(params: InspectInput) -> str:
 
     This is the "one step deeper" in the neural graph.
     """
+    from .graph import get_neighborhood, format_neighborhood, trace_call_chain
+    from .storage import Storage
     with Storage(params.project_root) as storage:
         node = None
 
@@ -319,6 +319,7 @@ async def neural_status(params: StatusInput) -> str:
     Shows index stats, how far behind the index is, and suggests
     actions if needed.
     """
+    from .agent import check_staleness, format_agent_report
     report = check_staleness(params.project_root)
     output = format_agent_report(report)
 
@@ -350,6 +351,8 @@ async def neural_config(params: ConfigInput) -> str:
     - add_redaction_pattern: Add a custom redaction regex
     - set_staleness_threshold: Set commits-behind threshold for staleness warnings
     """
+    from .config import load_config, save_config
+    from .models import IndexMode
     config = load_config(params.project_root)
 
     if params.action == "view":
@@ -405,6 +408,9 @@ async def neural_visualize(params: VisualizeInput) -> str:
     Output files are written to .neural-memory/ and can be opened in any browser.
     Requires: pip install neural-memory[viz]
     """
+    from .config import get_memory_dir
+    from .storage import Storage
+    from .visualize import generate_hierarchy_html, generate_vector_space_html
     memory_dir = get_memory_dir(params.project_root)
     outputs = []
 
@@ -466,6 +472,9 @@ async def neural_visualize_dashboard(params: DashboardInput) -> str:
     Output is written to .neural-memory/dashboard.html (or the path you specify).
     Open the file in any browser — no server required.
     """
+    from .config import get_memory_dir
+    from .dashboard import generate_dashboard_html
+    from .storage import Storage
     memory_dir = get_memory_dir(params.project_root)
     out_path = params.output_path or str(memory_dir / "dashboard.html")
 
@@ -513,7 +522,10 @@ async def neural_serve(params: ServeInput) -> str:
     Idempotent: calling again while the server is already running on the same port
     just re-opens the browser tab. Call neural_stop_serve to shut it down.
     """
+    from .config import get_memory_dir
+    from .dashboard import generate_dashboard_html
     from .serve import start_server, is_running, get_url
+    from .storage import Storage
 
     memory_dir = get_memory_dir(params.project_root)
     out_path = str(memory_dir / "dashboard.html")
@@ -610,6 +622,8 @@ async def neural_add_bug(params: AddBugInput) -> str:
     The bug node is linked to the specified file via a RELATES_TO edge and
     becomes searchable alongside code nodes in neural_query.
     """
+    from .models import NeuralNode, NodeType, NeuralEdge, EdgeType, SummaryMode
+    from .storage import Storage
     import hashlib
     from datetime import datetime, timezone
 
@@ -688,6 +702,8 @@ async def neural_add_task(params: AddTaskInput) -> str:
     Creates PHASE_CONTAINS edges if a phase is specified, and RELATES_TO
     edges for any related files. Tasks appear in neural_query results.
     """
+    from .models import NeuralNode, NodeType, NeuralEdge, EdgeType, SummaryMode
+    from .storage import Storage
     import hashlib
     from datetime import datetime, timezone
 
@@ -804,6 +820,7 @@ async def neural_index_db(params: IndexDbInput) -> str:
     """
     from .db.connector import detect_connection_string, fetch_schema
     from .db.schema_indexer import index_db_schema
+    from .storage import Storage
 
     # Resolve connection string
     cs = params.connection_string.strip()
@@ -894,6 +911,8 @@ async def neural_fetch_docs(params: FetchDocsInput) -> str:
     import neural_memory.docs  # triggers registration of all fetchers
     from neural_memory.docs.registry import fetch_docs
     from datetime import datetime, timezone
+    from .models import EdgeType
+    from .storage import Storage
 
     project_root = params.project_root or "."
 
@@ -962,6 +981,33 @@ async def neural_fetch_docs(params: FetchDocsInput) -> str:
             return "\n".join(lines)
 
 
+# ── Healthcheck Tool ──
+
+class PingInput(BaseModel):
+    """Input for healthcheck ping (no fields required)."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+
+@mcp.tool(
+    name="neural_ping",
+    annotations={
+        "title": "Neural Memory — Ping",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_ping(params: PingInput) -> str:
+    """Lightweight healthcheck — confirms the neural memory MCP server is running."""
+    from . import __version__
+    return f"neural-memory v{__version__} — MCP server is running."
+
+
 # Entry point
 if __name__ == "__main__":
-    mcp.run()
+    try:
+        mcp.run()
+    except Exception as exc:
+        print(f"neural-memory MCP server failed: {exc}", file=sys.stderr)
+        sys.exit(1)

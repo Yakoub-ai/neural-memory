@@ -76,6 +76,79 @@ def _pca_positions(nodes: list[dict]) -> dict[str, list[float]]:
     return result
 
 
+def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]]:
+    """Fruchterman-Reingold layout — numpy fast path, pure-Python fallback.
+
+    Returns {node_id: [x, y]} in the range roughly ±500 / ±400.
+    """
+    if not nodes:
+        return {}
+
+    ids = [n["id"] for n in nodes]
+    id_idx = {nid: i for i, nid in enumerate(ids)}
+    n = len(ids)
+
+    # Seed from PCA so semantically similar nodes start close
+    pca = _pca_positions(nodes)
+    W, H = 1000.0, 800.0
+
+    try:
+        import numpy as np
+
+        pos = np.array(
+            [[pca.get(nid, [0.0, 0.0])[0] * W * 0.38,
+              pca.get(nid, [0.0, 0.0])[1] * H * 0.38] for nid in ids],
+            dtype=np.float64,
+        )
+
+        # Build edge index (undirected)
+        ep = []
+        id_set = set(ids)
+        for e in edges:
+            s, t = e.get("source_id"), e.get("target_id")
+            if s in id_idx and t in id_idx and s != t:
+                ep.append((id_idx[s], id_idx[t]))
+        ep_arr = np.array(ep, dtype=np.int32) if ep else np.empty((0, 2), dtype=np.int32)
+
+        k = math.sqrt(W * H / max(n, 1)) * 1.3
+        temp = W / 4.0
+        cooling = temp / 61.0
+
+        for _ in range(60):
+            delta = pos[:, np.newaxis] - pos[np.newaxis, :]  # (n,n,2)
+            dist = np.linalg.norm(delta, axis=2)             # (n,n)
+            dist = np.where(dist < 0.5, 0.5, dist)
+            np.fill_diagonal(dist, 1.0)
+
+            rep = (k * k / dist)[:, :, np.newaxis] * delta / dist[:, :, np.newaxis]
+            disp = rep.sum(axis=1)
+
+            if len(ep_arr):
+                i_idx, j_idx = ep_arr[:, 0], ep_arr[:, 1]
+                dv = pos[i_idx] - pos[j_idx]
+                d = np.linalg.norm(dv, axis=1, keepdims=True).clip(min=1.0)
+                attr = dv / d * (d ** 2 / k)
+                np.add.at(disp, i_idx, -attr)
+                np.add.at(disp, j_idx,  attr)
+
+            dlen = np.linalg.norm(disp, axis=1, keepdims=True).clip(min=1.0)
+            pos += disp / dlen * np.minimum(dlen, temp)
+            pos[:, 0] = pos[:, 0].clip(-W / 2, W / 2)
+            pos[:, 1] = pos[:, 1].clip(-H / 2, H / 2)
+            temp = max(temp - cooling, 0.5)
+
+        return {ids[i]: [round(float(pos[i, 0]), 1), round(float(pos[i, 1]), 1)]
+                for i in range(n)}
+
+    except Exception:
+        pass
+
+    # Pure-Python fallback: just scale PCA positions
+    return {nid: [round(pca.get(nid, [0.0, 0.0])[0] * 460, 1),
+                  round(pca.get(nid, [0.0, 0.0])[1] * 360, 1)]
+            for nid in ids}
+
+
 def _build_hierarchy(nodes: list[dict], edges: list[dict]) -> dict:
     """Build a tree dict for ECharts treemap from CONTAINS/PHASE_CONTAINS edges."""
     contains_types = {"contains", "phase_contains", "task_contains"}
@@ -163,12 +236,16 @@ def _extract_data(storage: Storage) -> dict:
         })
 
     pca = _pca_positions(nodes)
+    graph_pos = _graph_layout(nodes, edges)
 
     # Remove embedding from node data (large, not needed in JS)
     for n in nodes:
         n.pop("embedding", None)
         n["px"] = pca.get(n["id"], [0.0, 0.0])[0]
         n["py"] = pca.get(n["id"], [0.0, 0.0])[1]
+        gp = graph_pos.get(n["id"], [0.0, 0.0])
+        n["gx"] = gp[0]
+        n["gy"] = gp[1]
 
     hierarchy = _build_hierarchy(nodes, edges)
 
@@ -385,6 +462,10 @@ function startApp() {
   function nodeColor(n) { return nodeStyleFor(n.node_type)[0]; }
   function edgeStyleFor(type) { return EDGE_STYLE[type] || ['#444d56', true, 1.0, true]; }
 
+  // ── O(1) node lookup ───────────────────────────────────────────────────────
+  var NODE_MAP = {};
+  RAW.nodes.forEach(function(n) { NODE_MAP[n.id] = n; });
+
   // ── State ──────────────────────────────────────────────────────────────────
   var state = {
     tab: 'hierarchy',
@@ -521,12 +602,12 @@ function startApp() {
     RAW.edges.forEach(function(e) {
       if (e.source_id === n.id && !seen[e.target_id]) {
         seen[e.target_id] = true;
-        var t = RAW.nodes.find(function(x) { return x.id === e.target_id; });
+        var t = NODE_MAP[e.target_id];
         if (t) connected.push({ node: t, type: e.edge_type, dir: 'out' });
       }
       if (e.target_id === n.id && !seen[e.source_id]) {
         seen[e.source_id] = true;
-        var s = RAW.nodes.find(function(x) { return x.id === e.source_id; });
+        var s = NODE_MAP[e.source_id];
         if (s) connected.push({ node: s, type: e.edge_type, dir: 'in' });
       }
     });
@@ -582,7 +663,7 @@ function startApp() {
   }
 
   function colorizeTree(node) {
-    var raw = RAW.nodes.find(function(x) { return x.id === node.id; });
+    var raw = NODE_MAP[node.id];
     var nodeType = raw ? raw.node_type : (node.node_type || 'other');
     var color = nodeStyleFor(nodeType)[0];
     var imp = raw ? (raw.importance || 0) : 0;
@@ -615,7 +696,7 @@ function startApp() {
         trigger: 'item',
         confine: true,
         formatter: function(params) {
-          var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+          var n = NODE_MAP[params.data.id];
           return n ? tipHtml(n) : params.name;
         }
       },
@@ -637,7 +718,7 @@ function startApp() {
         label: {
           show: true,
           formatter: function(params) {
-            var raw = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+            var raw = NODE_MAP[params.data.id];
             var prefix = '';
             if (raw) {
               var t = raw.node_type;
@@ -677,7 +758,7 @@ function startApp() {
     chart.off('click');
     chart.on('click', function(params) {
       if (!params.data || !params.data.id) return;
-      var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+      var n = NODE_MAP[params.data.id];
       if (n) showDetail(n);
     });
   }
@@ -721,7 +802,7 @@ function startApp() {
     // colouring and sizing each node by importance and type.
     function buildNode(hNode) {
       if (!hNode) return null;
-      var raw = RAW.nodes.find(function(x) { return x.id === hNode.id; });
+      var raw = NODE_MAP[hNode.id];
       var visible = !!visSet[hNode.id];
       var color = raw ? nodeColor(raw) : '#8b949e';
       var imp = raw ? (raw.importance || 0) : 0;
@@ -769,7 +850,7 @@ function startApp() {
         enterable: false,
         formatter: function(params) {
           if (!params.data || !params.data.id) return params.name || '';
-          var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+          var n = NODE_MAP[params.data.id];
           if (!n) return params.name || '';
           var nbrs = neighborMap[params.data.id];
           var nbStr = nbrs && nbrs.length
@@ -795,7 +876,8 @@ function startApp() {
           return params.data.symbolSize || 10;
         },
         lineStyle: { color: '#30363d88', width: 1.2, curveness: 0.45 },
-        scaleLimit: { min: 0.3, max: 4 },
+        scaleLimit: { min: 0.2, max: 5 },
+        labelLayout: { hideOverlap: true },
         emphasis: {
           focus: 'descendant',
           lineStyle: { width: 2.5, color: '#58a6ff55' }
@@ -844,7 +926,7 @@ function startApp() {
     chart.off('dblclick');
     chart.on('click', function(params) {
       if (!params.data || !params.data.id) return;
-      var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
+      var n = NODE_MAP[params.data.id];
       if (n) showDetail(n);
     });
     // Double-click to manually toggle collapse on a subtree node
@@ -860,18 +942,21 @@ function startApp() {
   var _graphNodes = [];  // snapshot for 2-hop focus
   var _graphZoom = 1;    // cumulative zoom factor for label scaling
 
-  function buildGraphNodes(nodes, zoom) {
+  function buildGraphNodes(nodes, zoom, airScale) {
     zoom = zoom || 1;
+    airScale = airScale || 1;
     return nodes.map(function(n) {
       var color = nodeColor(n);
       var catIdx = CATEGORY_LIST.indexOf(n.node_type);
       var w = nodeW(n);
-      // ~10px per char at fontSize 16; scale with zoom so more chars show when zoomed in
-      var maxChars = Math.max(4, Math.floor((w * Math.max(zoom, 1) - 12) / 10));
+      var maxChars = Math.max(4, Math.floor((w - 12) / 10));
       var label = n.name.length > maxChars ? n.name.slice(0, maxChars - 1) + '\u2026' : n.name;
       return {
         id: n.id,
         name: n.name,
+        x: (n.gx || 0) * airScale,
+        y: (n.gy || 0) * airScale,
+        fixed: true,
         symbolSize: [w, nodeH(n)],
         symbol: n.node_type === 'bug' ? 'diamond' : 'roundRect',
         itemStyle: {
@@ -926,6 +1011,8 @@ function startApp() {
       });
   }
 
+  var _airScale = 1;  // current air-slider position scale
+
   function drawGraph() {
     var chart = getChart('graph');
     if (!chart) return;
@@ -940,7 +1027,7 @@ function startApp() {
       var s = {}; nodes.forEach(function(n) { s[n.id] = true; }); return s;
     })());
 
-    var gNodes = buildGraphNodes(nodes);
+    var gNodes = buildGraphNodes(nodes, 1, _airScale);
     var links = buildGraphLinks(nodes, allEdges);
     var categories = CATEGORY_LIST.map(function(type) {
       return { name: type, itemStyle: { color: NODE_STYLE[type][0] } };
@@ -957,42 +1044,29 @@ function startApp() {
             return '<span style="color:#8b949e;font-size:10px">' +
               (params.data._edgeType || 'edge').replace(/_/g, ' ') + '</span>';
           }
-          var n = RAW.nodes.find(function(x) { return x.id === (params.data._id || params.data.id); });
+          var n = NODE_MAP[params.data._id || params.data.id];
           return n ? tipHtml(n) : params.name;
         }
       },
-      legend: [{
-        show: false,
-        data: categories.map(function(c) { return c.name; })
-      }],
+      legend: [{ show: false, data: categories.map(function(c) { return c.name; }) }],
       series: [{
         type: 'graph',
-        layout: 'force',
+        layout: 'none',
         roam: true,
         draggable: true,
-        animation: true,
-        animationDuration: 800,
-        animationDurationUpdate: 300,
-        animationEasingUpdate: 'cubicOut',
-        force: (function() {
-          var nc = gNodes.length;
-          var airVal = parseInt((document.getElementById('air-slider') || {}).value || 0);
-          var repBase = Math.max(260, 160 + nc * 2) + airVal * 60;
-          return {
-            repulsion: repBase,
-            edgeLength: [80 + airVal * 10, 160 + airVal * 20],
-            gravity: Math.max(0.04, 0.15 - airVal * 0.01),
-            friction: 1,
-            layoutAnimation: false
-          };
-        })(),
-        emphasis: { scale: false },
+        animation: false,
+        emphasis: { scale: false, focus: 'adjacency', blurScope: 'global' },
+        blur: { itemStyle: { opacity: 0.05 }, lineStyle: { opacity: 0.02 }, label: { opacity: 0 } },
         categories: categories,
         data: gNodes,
         links: links,
         lineStyle: { opacity: 0.65 }
       }]
     }, true);
+
+    // Build a dataIndex lookup for dispatchAction (gNodes is stable after init)
+    var _nodeDataIndex = {};
+    gNodes.forEach(function(d, idx) { _nodeDataIndex[d._id] = idx; });
 
     chart.off('click');
     chart.off('dblclick');
@@ -1007,52 +1081,39 @@ function startApp() {
         if (e.source_id === focusId) connSet[e.target_id] = true;
         if (e.target_id === focusId) connSet[e.source_id] = true;
       });
-      var updNodes = buildGraphNodes(nodes, _graphZoom).map(function(d) {
-        var inFocus = connSet[d._id];
-        d.itemStyle = Object.assign({}, d.itemStyle, { opacity: inFocus ? 1 : 0.06 });
-        d.label = Object.assign({}, d.label, { opacity: inFocus ? 1 : 0 });
-        return d;
-      });
-      var updLinks = buildGraphLinks(nodes, allEdges).map(function(l) {
-        var inFocus = connSet[l.source] && connSet[l.target];
-        l.lineStyle = Object.assign({}, l.lineStyle, { opacity: inFocus ? 0.8 : 0.03 });
-        return l;
-      });
-      chart.setOption({ series: [{ data: updNodes, links: updLinks, force: { layoutAnimation: false } }] }, false);
+      var indices = [];
+      gNodes.forEach(function(d, idx) { if (connSet[d._id]) indices.push(idx); });
+      chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: indices });
     }
 
     function _clearFocus() {
       _focusedId = null;
-      var updNodes = buildGraphNodes(nodes, _graphZoom);
-      var updLinks = buildGraphLinks(nodes, allEdges);
-      chart.setOption({ series: [{ data: updNodes, links: updLinks, force: { layoutAnimation: false } }] }, false);
+      chart.dispatchAction({ type: 'downplay', seriesIndex: 0 });
     }
 
     chart.on('click', function(params) {
       if (params.dataType !== 'node') return;
       var nid = params.data._id || params.data.id;
-      var n = RAW.nodes.find(function(x) { return x.id === nid; });
+      var n = NODE_MAP[nid];
       if (n) showDetail(n);
       _focusedId = nid;
       _applyFocus(nid);
     });
 
-    // Click on background → clear focus
     chart.getZr().on('click', function(evt) {
       if (!evt.target && _focusedId) _clearFocus();
     });
 
     chart.on('dblclick', function(params) {
       if (params.dataType !== 'node') return;
-      var nid = params.data._id || params.data.id;
-      focusSubgraph(nid, nodes, allEdges);
+      focusSubgraph(params.data._id || params.data.id, nodes, allEdges);
     });
 
     chart.getZr().on('dblclick', function(evt) {
       if (!evt.target) drawGraph();
     });
 
-    // Zoom-responsive font sizing — only update fontSize, never rebuild nodes
+    // Zoom: update only fontSize, no node rebuild, no layout change
     var _zoomTimer = null;
     chart.on('graphroam', function(params) {
       if (!params.zoom) return;
@@ -1060,12 +1121,12 @@ function startApp() {
       clearTimeout(_zoomTimer);
       _zoomTimer = setTimeout(function() {
         var fs = Math.min(52, Math.max(14, Math.round(16 * _graphZoom)));
-        chart.setOption({ series: [{ label: { fontSize: fs }, force: { layoutAnimation: false } }] }, false);
-      }, 100);
+        chart.setOption({ series: [{ label: { fontSize: fs } }] }, false);
+      }, 80);
     });
   }
 
-  // 2-hop subgraph focus
+  // 2-hop subgraph focus via dispatchAction — no data rebuild
   function focusSubgraph(nid, nodes, edges) {
     var chart = charts['graph'];
     if (!chart) return;
@@ -1085,22 +1146,9 @@ function startApp() {
       Object.keys(adj[id1] || {}).forEach(function(id2) { inScope[id2] = true; });
     });
 
-    var updNodes = buildGraphNodes(nodes).map(function(gn) {
-      if (!inScope[gn.id || gn._id]) {
-        gn.itemStyle = Object.assign({}, gn.itemStyle, { opacity: 0.07 });
-        gn.label = Object.assign({}, gn.label, { color: '#333' });
-      }
-      return gn;
-    });
-
-    var updLinks = buildGraphLinks(nodes, edges).map(function(l) {
-      if (!inScope[l.source] || !inScope[l.target]) {
-        l.lineStyle = Object.assign({}, l.lineStyle, { opacity: 0.04 });
-      }
-      return l;
-    });
-
-    chart.setOption({ series: [{ data: updNodes, links: updLinks }] }, false);
+    var indices = [];
+    _graphNodes.forEach(function(n, idx) { if (inScope[n.id]) indices.push(idx); });
+    chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: indices });
   }
 
   // ── Graph sidebar controls ─────────────────────────────────────────────────
@@ -1241,28 +1289,19 @@ function startApp() {
       });
     }
 
-    // Air (node spacing) slider — triggers brief re-layout then re-freezes
+    // Air (node spacing) slider — scales pre-computed positions, debounced, nodes only
     var airSlider = document.getElementById('air-slider');
-    var _airTimer = null;
+    var _airDebounce = null;
     if (airSlider) {
       airSlider.addEventListener('input', function() {
         var chart = charts['graph'];
         if (!chart || state.tab !== 'graph') return;
-        var air = parseInt(airSlider.value);
-        var nc = chart.getOption().series[0].data.length;
-        var repBase = Math.max(260, 160 + nc * 2) + air * 60;
-        // Brief animation to reposition, then lock immediately
-        chart.setOption({ series: [{ force: {
-          repulsion: repBase,
-          edgeLength: [80 + air * 10, 160 + air * 20],
-          gravity: Math.max(0.04, 0.15 - air * 0.01),
-          friction: 0.98,
-          layoutAnimation: true
-        }}] }, false);
-        clearTimeout(_airTimer);
-        _airTimer = setTimeout(function() {
-          chart.setOption({ series: [{ force: { layoutAnimation: false } }] }, false);
-        }, 800);
+        _airScale = 1 + parseInt(airSlider.value) * 0.18;
+        clearTimeout(_airDebounce);
+        _airDebounce = setTimeout(function() {
+          // Only update node positions — links don't need rebuild for layout:'none'
+          chart.setOption({ series: [{ data: buildGraphNodes(_graphNodes, _graphZoom, _airScale) }] }, false);
+        }, 60);
       });
     }
 
