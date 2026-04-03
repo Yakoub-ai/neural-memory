@@ -856,6 +856,112 @@ async def neural_index_db(params: IndexDbInput) -> str:
     )
 
 
+# ── Documentation Fetching Tool ──
+
+class FetchDocsInput(BaseModel):
+    """Input for fetching package documentation."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    package_name: str = Field(
+        default="auto",
+        description="Package name or 'auto' to fetch for all detected imports",
+    )
+    registry: Optional[str] = Field(
+        default=None,
+        description="Registry: 'pypi', 'npm', 'go', 'crates', or None for auto-detect",
+    )
+    project_root: str = Field(default=".", description="Project root directory path")
+
+
+@mcp.tool(
+    name="neural_fetch_docs",
+    annotations={
+        "title": "Neural Memory — Fetch Package Docs",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
+)
+async def neural_fetch_docs(params: FetchDocsInput) -> str:
+    """Fetch package documentation from registries (PyPI, npm, Go, crates.io) and cache
+    it in the knowledge graph.
+
+    Use package_name='auto' to discover all external imports in the indexed codebase
+    and fetch their docs in bulk. Or specify a single package name to fetch on demand.
+    Supports auto-detection of registry from package naming conventions, or explicit
+    registry selection.
+    """
+    import neural_memory.docs  # triggers registration of all fetchers
+    from neural_memory.docs.registry import fetch_docs
+    from datetime import datetime, timezone
+
+    project_root = params.project_root or "."
+
+    with Storage(project_root) as storage:
+        if params.package_name == "auto":
+            # Find all unresolved IMPORTS edges and extract package names
+            edges = storage.get_all_edges()
+            packages: set[str] = set()
+            for edge in edges:
+                if edge.edge_type == EdgeType.IMPORTS:
+                    if edge.target_id.startswith("__unresolved__"):
+                        pkg = (
+                            edge.target_id
+                            .replace("__unresolved__", "")
+                            .split(".")[0]
+                            .split("/")[0]
+                        )
+                        if pkg:
+                            packages.add(pkg)
+
+            fetched = []
+            failed = []
+            for pkg in sorted(packages):
+                doc = fetch_docs(pkg, params.registry)
+                if doc:
+                    storage.upsert_package_doc(
+                        doc.package_name, doc.registry,
+                        doc.to_storage_dict(), doc.fetched_at,
+                    )
+                    fetched.append(f"{pkg} ({doc.registry})")
+                else:
+                    failed.append(pkg)
+
+            lines = ["## Documentation Fetch Results\n"]
+            lines.append(f"**Fetched**: {len(fetched)} packages")
+            if fetched:
+                lines.append("\n".join(f"- {p}" for p in fetched))
+            if failed:
+                lines.append(f"\n**Not found**: {', '.join(failed[:20])}")
+            return "\n".join(lines)
+
+        else:
+            doc = fetch_docs(params.package_name, params.registry)
+            if not doc:
+                return (
+                    f"No documentation found for `{params.package_name}`. "
+                    f"Try specifying the registry with `registry='pypi'` (or 'npm', 'go', 'crates')."
+                )
+
+            storage.upsert_package_doc(
+                doc.package_name, doc.registry,
+                doc.to_storage_dict(), doc.fetched_at,
+            )
+
+            lines = [
+                f"## {doc.package_name} ({doc.registry})",
+                f"**Version**: {doc.version or 'unknown'}",
+                f"**Summary**: {doc.summary or 'No summary available'}",
+            ]
+            if doc.homepage_url:
+                lines.append(f"**Homepage**: {doc.homepage_url}")
+            if doc.doc_url:
+                lines.append(f"**Docs**: {doc.doc_url}")
+            if doc.description and doc.description != doc.summary:
+                lines.append(f"\n{doc.description[:1000]}")
+            return "\n".join(lines)
+
+
 # Entry point
 if __name__ == "__main__":
     mcp.run()

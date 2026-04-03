@@ -98,6 +98,20 @@ class Storage:
                 version INTEGER NOT NULL DEFAULT 2
             );
 
+            CREATE TABLE IF NOT EXISTS package_docs (
+                package_name TEXT NOT NULL,
+                registry TEXT NOT NULL,
+                version TEXT DEFAULT '',
+                summary TEXT DEFAULT '',
+                description TEXT DEFAULT '',
+                homepage_url TEXT DEFAULT '',
+                doc_url TEXT DEFAULT '',
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (package_name, registry)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_pkgdocs_registry ON package_docs(registry);
+
         """)
         self._migrate_schema()
         self.conn.commit()
@@ -119,6 +133,25 @@ class Storage:
         # v2→v3: add language column to nodes table
         try:
             self.conn.execute("ALTER TABLE nodes ADD COLUMN language TEXT DEFAULT ''")
+            self.conn.commit()
+        except Exception:
+            pass
+        # v3→v4: add package_docs table
+        try:
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS package_docs (
+                    package_name TEXT NOT NULL,
+                    registry TEXT NOT NULL,
+                    version TEXT DEFAULT '',
+                    summary TEXT DEFAULT '',
+                    description TEXT DEFAULT '',
+                    homepage_url TEXT DEFAULT '',
+                    doc_url TEXT DEFAULT '',
+                    fetched_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, registry)
+                );
+                CREATE INDEX IF NOT EXISTS idx_pkgdocs_registry ON package_docs(registry);
+            """)
             self.conn.commit()
         except Exception:
             pass
@@ -361,6 +394,41 @@ class Storage:
         if row:
             return EmbeddingMeta.from_dict(json.loads(row["data"]))
         return None
+
+    # ── Package docs ──
+
+    def upsert_package_doc(self, package_name: str, registry: str, data: dict, fetched_at: str) -> None:
+        """Store or update a fetched package doc. data contains: version, summary, description, homepage_url, doc_url"""
+        self.conn.execute(
+            """INSERT INTO package_docs (package_name, registry, version, summary, description, homepage_url, doc_url, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(package_name, registry) DO UPDATE SET
+                   version=excluded.version, summary=excluded.summary,
+                   description=excluded.description, homepage_url=excluded.homepage_url,
+                   doc_url=excluded.doc_url, fetched_at=excluded.fetched_at""",
+            (
+                package_name, registry,
+                data.get("version", ""), data.get("summary", ""),
+                data.get("description", ""), data.get("homepage_url", ""),
+                data.get("doc_url", ""), fetched_at,
+            )
+        )
+        self.conn.commit()
+
+    def get_package_doc(self, package_name: str, registry: str) -> Optional[dict]:
+        """Retrieve a cached package doc. Returns dict with all fields, or None."""
+        row = self.conn.execute(
+            "SELECT * FROM package_docs WHERE package_name = ? AND registry = ?",
+            (package_name, registry)
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
+
+    def get_all_package_docs(self) -> list[dict]:
+        """Return all cached package docs as list of dicts."""
+        rows = self.conn.execute("SELECT * FROM package_docs").fetchall()
+        return [dict(r) for r in rows]
 
     # ── Batch operations ──
 

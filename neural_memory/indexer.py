@@ -271,6 +271,19 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
         )
         storage.save_index_state(state)
 
+        # Phase 7: Discover external packages (for doc fetching suggestion)
+        try:
+            external_pkgs: set[str] = set()
+            for edge in all_edges:
+                if edge.edge_type.value == "imports" and edge.target_id.startswith("__unresolved__"):
+                    pkg = edge.target_id.replace("__unresolved__", "").split(".")[0]
+                    if pkg and not pkg.startswith("_"):
+                        external_pkgs.add(pkg)
+            if external_pkgs:
+                stats["external_packages_detected"] = len(external_pkgs)
+        except Exception:
+            pass
+
     return stats
 
 
