@@ -79,7 +79,7 @@ def _pca_positions(nodes: list[dict]) -> dict[str, list[float]]:
 def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]]:
     """Fruchterman-Reingold layout — numpy fast path, pure-Python fallback.
 
-    Returns {node_id: [x, y]} in the range roughly ±500 / ±400.
+    Returns {node_id: [x, y]} scaled to fit node count without overlap.
     """
     if not nodes:
         return {}
@@ -88,9 +88,12 @@ def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]
     id_idx = {nid: i for i, nid in enumerate(ids)}
     n = len(ids)
 
+    # Scale canvas with node count so there's enough room for all nodes
+    area_scale = max(1.0, math.sqrt(n / 25.0))
+    W, H = 1000.0 * area_scale, 800.0 * area_scale
+
     # Seed from PCA so semantically similar nodes start close
     pca = _pca_positions(nodes)
-    W, H = 1000.0, 800.0
 
     try:
         import numpy as np
@@ -103,14 +106,15 @@ def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]
 
         # Build edge index (undirected)
         ep = []
-        id_set = set(ids)
         for e in edges:
             s, t = e.get("source_id"), e.get("target_id")
             if s in id_idx and t in id_idx and s != t:
                 ep.append((id_idx[s], id_idx[t]))
         ep_arr = np.array(ep, dtype=np.int32) if ep else np.empty((0, 2), dtype=np.int32)
 
-        k = math.sqrt(W * H / max(n, 1)) * 1.3
+        # k is the ideal inter-node distance; enforce a minimum to prevent overlap
+        # Average node is ~90px wide × 30px tall; 2.5× gives comfortable separation
+        k = max(math.sqrt(W * H / max(n, 1)) * 1.6, 225.0)
         temp = W / 4.0
         cooling = temp / 61.0
 
@@ -137,15 +141,38 @@ def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]
             pos[:, 1] = pos[:, 1].clip(-H / 2, H / 2)
             temp = max(temp - cooling, 0.5)
 
+        # Overlap removal post-pass: push apart nodes whose bounding boxes collide.
+        # min_sep scales with W so that on-screen separation (after ECharts auto-fit)
+        # always exceeds the node's screen size — W*0.22 / (2*W/viewport) = 0.11*viewport.
+        min_sep_x = max(160.0, W * 0.22)
+        min_sep_y = max(80.0, H * 0.13)
+        for _ in range(25):
+            dx = pos[:, np.newaxis, 0] - pos[np.newaxis, :, 0]   # (n,n)
+            dy = pos[:, np.newaxis, 1] - pos[np.newaxis, :, 1]
+            ovlp_x = min_sep_x - np.abs(dx)
+            ovlp_y = min_sep_y - np.abs(dy)
+            mask = (ovlp_x > 0) & (ovlp_y > 0)
+            np.fill_diagonal(mask, False)
+            if not mask.any():
+                break
+            sx = np.where(dx >= 0, 1.0, -1.0)
+            sy = np.where(dy >= 0, 1.0, -1.0)
+            push_x = (mask * ovlp_x * sx * 0.5).sum(axis=1)
+            push_y = (mask * ovlp_y * sy * 0.5).sum(axis=1)
+            # Use expanded clip so overlap removal can push beyond FR bounds
+            pos[:, 0] = (pos[:, 0] + push_x).clip(-W * 1.5, W * 1.5)
+            pos[:, 1] = (pos[:, 1] + push_y).clip(-H * 1.5, H * 1.5)
+
         return {ids[i]: [round(float(pos[i, 0]), 1), round(float(pos[i, 1]), 1)]
                 for i in range(n)}
 
     except Exception:
         pass
 
-    # Pure-Python fallback: just scale PCA positions
-    return {nid: [round(pca.get(nid, [0.0, 0.0])[0] * 460, 1),
-                  round(pca.get(nid, [0.0, 0.0])[1] * 360, 1)]
+    # Pure-Python fallback: scale PCA positions proportionally
+    fallback_scale = 460.0 * area_scale
+    return {nid: [round(pca.get(nid, [0.0, 0.0])[0] * fallback_scale, 1),
+                  round(pca.get(nid, [0.0, 0.0])[1] * fallback_scale * 0.78, 1)]
             for nid in ids}
 
 
@@ -349,7 +376,7 @@ def _html_body() -> str:
       <div class="sb-head">Edge Types</div>
       <div id="edge-toggles"></div>
       <div class="sb-head" style="margin-top:10px">Node Spacing</div>
-      <input type="range" id="air-slider" min="0" max="10" step="1" value="0">
+      <input type="range" id="air-slider" min="0" max="10" step="1" value="5">
       <div class="range-labels"><span>Tight</span><span>Spread</span></div>
       <div class="sb-head" style="margin-top:6px">Graph Options</div>
       <div class="filter-row">
@@ -945,11 +972,16 @@ function startApp() {
   function buildGraphNodes(nodes, zoom, airScale) {
     zoom = zoom || 1;
     airScale = airScale || 1;
+    // Scale nodes down for large graphs so they don't overlap after ECharts auto-fit.
+    // ECharts fits the bounding box to viewport, so screen_sep ∝ 1/sqrt(n).
+    // Scaling node size by the same factor keeps separation > node size at any n.
+    var sizeScale = Math.max(0.38, Math.min(1.0, Math.sqrt(30 / Math.max(1, nodes.length))));
     return nodes.map(function(n) {
       var color = nodeColor(n);
       var catIdx = CATEGORY_LIST.indexOf(n.node_type);
-      var w = nodeW(n);
-      var maxChars = Math.max(4, Math.floor((w - 12) / 10));
+      var w = Math.round(nodeW(n) * sizeScale);
+      var h = Math.round(nodeH(n) * sizeScale);
+      var maxChars = Math.max(3, Math.floor((w - 10) / 10));
       var label = n.name.length > maxChars ? n.name.slice(0, maxChars - 1) + '\u2026' : n.name;
       return {
         id: n.id,
@@ -957,12 +989,12 @@ function startApp() {
         x: (n.gx || 0) * airScale,
         y: (n.gy || 0) * airScale,
         fixed: true,
-        symbolSize: [w, nodeH(n)],
+        symbolSize: [w, h],
         symbol: n.node_type === 'bug' ? 'diamond' : 'roundRect',
         itemStyle: {
           color: color + '22',
           borderColor: color,
-          borderWidth: 1.5 + (n.importance || 0) * 2,
+          borderWidth: Math.max(1, (1.5 + (n.importance || 0) * 2) * sizeScale),
           opacity: 1
         },
         emphasis: {
@@ -972,11 +1004,11 @@ function startApp() {
         label: {
           show: true,
           formatter: label,
-          fontSize: Math.min(52, Math.max(14, Math.round(16 * zoom))),
+          fontSize: Math.min(52, Math.max(10, Math.round(16 * zoom * sizeScale))),
           color: '#e6edf3',
           position: 'inside',
           overflow: 'truncate',
-          width: w - 12
+          width: w - 10
         },
         category: catIdx >= 0 ? catIdx : 0,
         value: n.importance || 0,
@@ -1011,7 +1043,7 @@ function startApp() {
       });
   }
 
-  var _airScale = 1;  // current air-slider position scale
+  var _airScale = 1 + 5 * 0.18;  // default matches air-slider value="5"
 
   function drawGraph() {
     var chart = getChart('graph');
@@ -1055,6 +1087,8 @@ function startApp() {
         roam: true,
         draggable: true,
         animation: false,
+        // Zoom in so ~30 nodes are comfortably visible at once; users can zoom out
+        zoom: Math.max(1.0, Math.sqrt(gNodes.length / 30)),
         emphasis: { scale: false, focus: 'adjacency', blurScope: 'global' },
         blur: { itemStyle: { opacity: 0.05 }, lineStyle: { opacity: 0.02 }, label: { opacity: 0 } },
         categories: categories,
