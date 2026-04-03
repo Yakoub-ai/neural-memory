@@ -21,7 +21,6 @@ Thumbs.db
 
 # Claude Code local context and settings
 .claude/
-tests/
 
 # Type checking / linting
 .mypy_cache/
