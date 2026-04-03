@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import get_memory_dir, DB_FILE
-from .models import NeuralNode, NeuralEdge, IndexState, NodeType, EdgeType
+from .models import NeuralNode, NeuralEdge, IndexState, EmbeddingMeta, NodeType, EdgeType
 
 
 class Storage:
@@ -48,6 +48,7 @@ class Storage:
                 line_end INTEGER,
                 content_hash TEXT,
                 importance REAL DEFAULT 0.0,
+                category TEXT DEFAULT 'codebase',
                 data JSON NOT NULL
             );
 
@@ -78,24 +79,59 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
             CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
             CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
+
+            CREATE TABLE IF NOT EXISTS embeddings (
+                node_id TEXT PRIMARY KEY,
+                vector BLOB NOT NULL,
+                content_hash TEXT NOT NULL,
+                FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS embedding_meta (
+                key TEXT PRIMARY KEY DEFAULT 'main',
+                data JSON NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_version (
+                key TEXT PRIMARY KEY DEFAULT 'main',
+                version INTEGER NOT NULL DEFAULT 2
+            );
+
         """)
+        self._migrate_schema()
         self.conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Apply incremental schema migrations for existing databases."""
+        # v1→v2: add category column to nodes table
+        try:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN category TEXT DEFAULT 'codebase'")
+            self.conn.commit()
+        except Exception:
+            pass  # Column already exists — safe to ignore
+        # Create category index after column is guaranteed to exist
+        try:
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_category ON nodes(category)")
+            self.conn.commit()
+        except Exception:
+            pass
 
     # ── Node operations ──
 
     def upsert_node(self, node: NeuralNode) -> None:
         self.conn.execute(
             """INSERT INTO nodes (id, name, node_type, file_path, line_start, line_end,
-                                  content_hash, importance, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  content_hash, importance, category, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    name=excluded.name, node_type=excluded.node_type,
                    file_path=excluded.file_path, line_start=excluded.line_start,
                    line_end=excluded.line_end, content_hash=excluded.content_hash,
-                   importance=excluded.importance, data=excluded.data""",
+                   importance=excluded.importance, category=excluded.category,
+                   data=excluded.data""",
             (node.id, node.name, node.node_type.value, node.file_path,
              node.line_start, node.line_end, node.content_hash,
-             node.importance, json.dumps(node.to_dict()))
+             node.importance, node.category, json.dumps(node.to_dict()))
         )
         self.conn.commit()
 
@@ -110,6 +146,12 @@ class Storage:
     def get_nodes_by_file(self, file_path: str) -> list[NeuralNode]:
         rows = self.conn.execute(
             "SELECT data FROM nodes WHERE file_path = ?", (file_path,)
+        ).fetchall()
+        return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
+
+    def get_nodes_by_category(self, category: str) -> list[NeuralNode]:
+        rows = self.conn.execute(
+            "SELECT data FROM nodes WHERE category = ?", (category,)
         ).fetchall()
         return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
 
@@ -158,6 +200,14 @@ class Storage:
              edge.context, edge.weight)
         )
         self.conn.commit()
+
+    def get_all_edges(self) -> list[NeuralEdge]:
+        rows = self.conn.execute("SELECT * FROM edges").fetchall()
+        return [NeuralEdge(
+            source_id=r["source_id"], target_id=r["target_id"],
+            edge_type=EdgeType(r["edge_type"]),
+            context=r["context"], weight=r["weight"]
+        ) for r in rows]
 
     def get_edges_from(self, node_id: str) -> list[NeuralEdge]:
         rows = self.conn.execute(
@@ -247,6 +297,63 @@ class Storage:
             "SELECT file_path, content_hash FROM file_hashes"
         ).fetchall()
         return {r["file_path"]: r["content_hash"] for r in rows}
+
+    # ── Embeddings ──
+
+    def upsert_embedding(self, node_id: str, vector_bytes: bytes, content_hash: str) -> None:
+        self.conn.execute(
+            """INSERT INTO embeddings (node_id, vector, content_hash)
+               VALUES (?, ?, ?)
+               ON CONFLICT(node_id) DO UPDATE SET
+                   vector=excluded.vector,
+                   content_hash=excluded.content_hash""",
+            (node_id, vector_bytes, content_hash)
+        )
+        self.conn.commit()
+
+    def get_embedding(self, node_id: str) -> Optional[bytes]:
+        row = self.conn.execute(
+            "SELECT vector FROM embeddings WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        return bytes(row["vector"]) if row else None
+
+    def get_all_embeddings(self) -> dict[str, bytes]:
+        """Returns {node_id: vector_bytes} for all embedded nodes."""
+        rows = self.conn.execute(
+            "SELECT node_id, vector FROM embeddings"
+        ).fetchall()
+        return {r["node_id"]: bytes(r["vector"]) for r in rows}
+
+    def get_embedding_hashes(self) -> dict[str, str]:
+        """Returns {node_id: content_hash} for staleness checking."""
+        rows = self.conn.execute(
+            "SELECT node_id, content_hash FROM embeddings"
+        ).fetchall()
+        return {r["node_id"]: r["content_hash"] for r in rows}
+
+    def delete_embeddings_by_file(self, file_path: str) -> None:
+        self.conn.execute(
+            """DELETE FROM embeddings WHERE node_id IN
+               (SELECT id FROM nodes WHERE file_path = ?)""",
+            (file_path,)
+        )
+        self.conn.commit()
+
+    def save_embedding_meta(self, meta: EmbeddingMeta) -> None:
+        self.conn.execute(
+            """INSERT INTO embedding_meta (key, data) VALUES ('main', ?)
+               ON CONFLICT(key) DO UPDATE SET data=excluded.data""",
+            (json.dumps(meta.to_dict()),)
+        )
+        self.conn.commit()
+
+    def get_embedding_meta(self) -> Optional[EmbeddingMeta]:
+        row = self.conn.execute(
+            "SELECT data FROM embedding_meta WHERE key = 'main'"
+        ).fetchone()
+        if row:
+            return EmbeddingMeta.from_dict(json.loads(row["data"]))
+        return None
 
     # ── Stats ──
 

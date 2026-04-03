@@ -4,118 +4,51 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![MCP Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-green.svg)](https://github.com/Yakoub-ai/neural-memory)
 
-> A knowledge graph plugin for Claude Code that maps your codebase into layered, navigable neural nodes — understand any function without reading the entire file.
-
----
-
-## Quick Start (3 steps)
-
-**Step 1 — Install the Python package:**
-```bash
-pip install git+https://github.com/Yakoub-ai/neural-memory.git
-```
-
-**Step 2 — Add the marketplace and install the plugin in Claude Code:**
-```
-/plugin marketplace add Yakoub-ai/neural-memory
-/plugin install neural-memory@Yakoub-ai
-```
-
-**Step 3 — Build your knowledge graph:**
-```
-/neural-index
-```
-
-That's it. Neural memory is now running.
+> A persistent knowledge graph plugin for Claude Code that maps your codebase into three layers — code, bugs, and tasks — so Claude always has deep context without burning tokens re-reading files.
 
 ---
 
 ## What It Does
 
-Neural Memory parses your Python codebase into a directed knowledge graph — nodes are functions, classes, methods, and modules; edges are calls, imports, and inheritance. Every node gets layered summaries (one-liner + detailed), so you can understand any piece of code without reading the whole file. The index updates incrementally via git diff, and all sensitive values (API keys, passwords, tokens) are automatically redacted before anything is stored.
+Neural Memory builds and maintains a **three-layer directed knowledge graph** of your project:
+
+| Layer | Nodes | Connected To |
+|-------|-------|-------------|
+| **Codebase** | modules, classes, functions, methods, project/dir overviews | each other via calls/imports/inheritance/containment |
+| **Bugs** | bug entries from `.claude/context-log-gotchas.md` | code nodes by file path (`RELATES_TO`) |
+| **Tasks** | phases and tasks from `.claude/context-log-tasks-*.md` | code nodes (`RELATES_TO`), each other (`PHASE_CONTAINS`) |
+
+Every node gets:
+- **Layered summaries** — heuristic one-liner from AST, optionally enriched via Claude API
+- **128-dim composite embeddings** — 100-dim TF-IDF+SVD content vector + 28-dim structural graph features
+- **LSP enrichment** — type signatures and diagnostics from Pyright/pylsp (if installed)
+- **Importance scores** — graph-centrality weighted by node type
+
+Search uses a **three-phase branch algorithm**: seed by cosine similarity → expand through graph edges with decay/pruning → re-rank by combined score. Sensitive values (API keys, tokens, passwords) are automatically redacted before storage.
 
 ---
 
-## Architecture
+## Quick Start
 
-```
-┌─────────────────────────────────────────────────┐
-│                  Claude Code                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
-│  │ /neural- │  │ /neural- │  │ /neural- │ ...  │
-│  │  index   │  │  query   │  │  inspect │      │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘      │
-│       └──────────────┼──────────────┘            │
-│                      ▼                           │
-│            ┌──────────────────┐                  │
-│            │  MCP Server      │                  │
-│            │  (neural_memory) │                  │
-│            └────────┬─────────┘                  │
-└─────────────────────┼───────────────────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │       Core Engine           │
-        │  ┌─────────┐ ┌──────────┐  │
-        │  │ Parser  │ │Summarizer│  │
-        │  │ (AST)   │ │(API+Heur)│  │
-        │  └────┬────┘ └────┬─────┘  │
-        │       ▼            ▼        │
-        │  ┌─────────┐ ┌──────────┐  │
-        │  │Redactor │ │  Graph   │  │
-        │  │(Secrets)│ │(Traverse)│  │
-        │  └────┬────┘ └────┬─────┘  │
-        │       └──────┬─────┘        │
-        │              ▼              │
-        │     ┌────────────────┐      │
-        │     │ SQLite + JSON  │      │
-        │     │ (.neural-memory)│     │
-        │     └────────────────┘      │
-        └─────────────────────────────┘
-```
-
----
-
-## Commands Reference
-
-| Command | Purpose |
-|---------|---------|
-| `/neural-index` | Build the full knowledge graph (first time or full rebuild) |
-| `/neural-query` | Search for functions, classes, or concepts by name |
-| `/neural-inspect` | Deep-dive into a node: callers, callees, call chains, source |
-| `/neural-update` | Incremental sync with recent git changes |
-| `/neural-status` | Check index health, staleness, and node/edge counts |
-| `/neural-config` | View or modify settings (mode, exclusions, redaction, threshold) |
-
----
-
-## Installation Options
-
-### Option A: Claude Code Plugin (Recommended)
-
-The plugin system handles MCP server registration and slash command setup automatically.
-
+**Step 1 — Install:**
 ```bash
-# 1. Install the Python package
-pip install git+https://github.com/Yakoub-ai/neural-memory.git
-
-# 2. In Claude Code, add the marketplace and install
-/plugin marketplace add Yakoub-ai/neural-memory
-/plugin install neural-memory@Yakoub-ai
+pip install "neural-memory[all] @ git+https://github.com/Yakoub-ai/neural-memory.git"
 ```
 
-### Option B: Manual Setup
-
-<details>
-<summary>Click to expand manual setup instructions</summary>
-
-**1. Install the package:**
-```bash
-pip install git+https://github.com/Yakoub-ai/neural-memory.git
+**Step 2 — Register the MCP server** in `~/.claude.json` (global, works across all projects):
+```json
+{
+  "mcpServers": {
+    "neural-memory": {
+      "command": "python",
+      "args": ["-m", "neural_memory.server"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
 ```
 
-**2. Add the MCP server to your Claude Code settings:**
-
-Global (`~/.claude/settings.json`) — recommended, works across all projects:
+Or use the `neural-memory` console script if it is on your PATH:
 ```json
 {
   "mcpServers": {
@@ -126,7 +59,65 @@ Global (`~/.claude/settings.json`) — recommended, works across all projects:
 }
 ```
 
-If `neural-memory` is not on your PATH, use the full Python form:
+**Step 3 — Install slash commands** into your project:
+```bash
+cd your-project
+neural-memory-setup install-commands
+```
+
+**Step 4 — Build the knowledge graph:**
+```
+/neural-index
+```
+
+**Done.** Claude now has persistent, token-efficient context about your entire codebase.
+
+---
+
+## Installation Options
+
+### Option A — Claude Code Plugin (Recommended)
+
+The plugin marketplace handles MCP registration and slash command setup automatically.
+
+```bash
+pip install "neural-memory[all] @ git+https://github.com/Yakoub-ai/neural-memory.git"
+```
+
+Then in Claude Code:
+```
+/plugin marketplace add Yakoub-ai/neural-memory
+/plugin install neural-memory@Yakoub-ai
+```
+
+### Option B — Manual MCP Setup
+
+**1. Install the package:**
+```bash
+# Core only (no embeddings/visualization)
+pip install "neural-memory @ git+https://github.com/Yakoub-ai/neural-memory.git"
+
+# With semantic search (recommended)
+pip install "neural-memory[vectors] @ git+https://github.com/Yakoub-ai/neural-memory.git"
+
+# With everything (embeddings + D3 dashboard)
+pip install "neural-memory[all] @ git+https://github.com/Yakoub-ai/neural-memory.git"
+```
+
+**2. Add to `~/.claude.json`** (global, persists across projects):
+```json
+{
+  "mcpServers": {
+    "neural-memory": {
+      "command": "python",
+      "args": ["-m", "neural_memory.server"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+Or add to your project's `.mcp.json` (project-scoped):
 ```json
 {
   "mcpServers": {
@@ -138,84 +129,400 @@ If `neural-memory` is not on your PATH, use the full Python form:
 }
 ```
 
-**3. Install slash commands:**
+**3. Install slash commands (optional but recommended):**
 ```bash
-cd your-project
 neural-memory-setup install-commands
 ```
 
-This copies the 6 `/neural-*` command files into your project's `.claude/commands/`.
-
-**4. (Optional) Add the agent hook to your project's CLAUDE.md:**
-
-Append the following so Claude auto-checks staleness on every session:
+**4. Add the agent hook** to your project's `CLAUDE.md` so Claude always checks freshness:
 ```markdown
-## Neural Memory Agent Hook
-
+## Agent Hook
 On each invocation, check neural memory staleness by running the `neural_status` tool.
 If the index is stale or uninitialized, inform the user and suggest the appropriate action.
 ```
 
-Or run `neural-memory-setup install` for an interactive guided setup.
+### Option C — Project-local (no global install)
 
-</details>
+```bash
+git clone https://github.com/Yakoub-ai/neural-memory.git /path/to/neural-memory
+pip install -e "/path/to/neural-memory[all]"
+```
+
+Then set `"cwd": "/path/to/neural-memory"` in your MCP config.
 
 ---
 
-## Data Residency & Privacy
+## Commands Reference
 
-Three indexing modes — choose based on your data sensitivity:
+### Slash Commands (in Claude Code)
 
-| Mode | Summaries | Code leaves machine? |
-|------|-----------|---------------------|
-| `ast_only` | Heuristic (from AST) | **No** |
-| `api_only` | Claude API | Yes — high-importance nodes only |
-| `both` | Heuristic + API enrichment | Yes — high-importance nodes only |
+| Command | MCP Tool | Description |
+|---------|----------|-------------|
+| `/neural-index` | `neural_index` | Full index of all Python files + context logs. Parses AST, imports bugs/tasks, computes embeddings, generates overviews. Run once at project start or after large changes. |
+| `/neural-update` | `neural_update` | Incremental update via git diff + file hash comparison. Only re-parses changed files. Fast — run after any code change. |
+| `/neural-query` | `neural_query` | Semantic search across all three layers. Finds functions, classes, bugs, and tasks by concept. Uses 128-dim embeddings + graph expansion. |
+| `/neural-inspect` | `neural_inspect` | Deep-dive into a node: full summary, callers, callees, parent/children, LSP type info, diagnostics. |
+| `/neural-status` | `neural_status` | Index health check — shows total nodes/edges, last index time, git staleness, and a freshness verdict. |
+| `/neural-config` | `neural_config` | View or modify settings: indexing mode, include/exclude patterns, redaction rules, LSP settings. |
 
-Switch modes anytime:
+### MCP Tools (callable by Claude directly)
+
+All tools accept a `project_root` parameter (default `"."`).
+
+---
+
+#### `neural_index`
+Full codebase index.
+
 ```
-/neural-config   →   set_mode: ast_only
+Parameters:
+  project_root  string  Project root directory (default: ".")
+  mode          string  "ast_only" | "api" | "both" (default: from config)
+```
+
+**What it does:**
+1. Discovers all Python files matching `include_patterns`
+2. Parses AST → module/class/function/method nodes + call/import/inheritance edges
+3. Imports bug nodes from `.claude/context-log-gotchas.md`
+4. Imports phase/task nodes from `.claude/context-log-tasks-*.md`
+5. Computes graph importance scores
+6. Optionally enriches high-importance nodes with LSP hover/diagnostics
+7. Generates project + directory overview nodes
+8. Computes 128-dim composite embeddings for all nodes
+9. Optionally generates Claude API summaries for high-importance nodes
+
+---
+
+#### `neural_update`
+Incremental update — only processes changed files.
+
+```
+Parameters:
+  project_root  string  Project root directory (default: ".")
+```
+
+Uses git diff and file-hash comparison to detect changes. Re-parses only modified files, preserves all bug/task/overview nodes.
+
+---
+
+#### `neural_query`
+Semantic search across code, bugs, and tasks.
+
+```
+Parameters:
+  query         string  Natural language or keyword query
+  project_root  string  Project root directory (default: ".")
+  limit         int     Max results (default: 10)
+  node_type     string  Filter by type: "function" | "class" | "bug" | "task" | ...
+  category      string  Filter by layer: "codebase" | "bugs" | "tasks"
+```
+
+Returns ranked results with node type, file path, importance score, summary, and edge counts.
+
+---
+
+#### `neural_inspect`
+Full deep-dive into a specific node.
+
+```
+Parameters:
+  node_id       string  Node ID (from neural_query results)
+  node_name     string  Node name to look up (alternative to node_id)
+  project_root  string  Project root directory (default: ".")
+  show_code     bool    Include raw source code (default: false)
+  trace_calls   bool    Trace full call chain (default: false)
+```
+
+Returns: parent, children, callers (up to 50), callees, LSP hover doc, diagnostics, importance, summary.
+
+---
+
+#### `neural_status`
+Index health and staleness check.
+
+```
+Parameters:
+  project_root  string  Project root directory (default: ".")
+```
+
+Returns: total nodes/edges/files, last full index time, last incremental time, git commits behind, freshness verdict.
+
+---
+
+#### `neural_config`
+View or update configuration.
+
+```
+Parameters:
+  project_root      string  Project root directory (default: ".")
+  action            string  "get" | "set_mode" | "add_exclude" | "add_redaction_pattern" | "set_lsp"
+  value             string  Value for the action (e.g. "ast_only", "**/.venv/**", "(?i)my_secret")
+```
+
+Available modes: `ast_only` (no API calls), `api` (API only), `both` (heuristic + API enrichment).
+
+---
+
+#### `neural_visualize`
+Generate static HTML visualizations (legacy).
+
+```
+Parameters:
+  project_root  string  Project root directory (default: ".")
+  mode          string  "hierarchy" | "vectors" | "both"
+  color_by      string  "node_type" | "importance" | "category"
+  dimensions    int     PCA dimensions for vector view (2 or 3)
+```
+
+Writes HTML files to `.neural-memory/`. Requires `numpy` (`pip install neural-memory[vectors]`).
+
+---
+
+#### `neural_visualize_dashboard`
+Generate the interactive D3 knowledge-graph dashboard.
+
+```
+Parameters:
+  project_root  string  Project root directory (default: ".")
+  output_path   string  Output path (default: ".neural-memory/dashboard.html")
+```
+
+Produces a single self-contained HTML file (~750KB) with:
+- **Hierarchy tab** — treemap of module → class → function, sized by importance
+- **Vectors tab** — PCA scatter of all node embeddings, clustered by semantic similarity
+- **Graph tab** — force-directed layout with draggable nodes, edge type coloring, zoom/pan
+- **Sidebar filters** — category (codebase/bugs/tasks), node type, importance slider, status, text search, treemap depth
+- **Detail panel** — click any node for full info: summary, LSP data, diagnostics, file path
+
+Requires `numpy` for PCA. Falls back to circular layout without it.
+
+---
+
+#### `neural_add_bug`
+Manually create a bug node (when not using context logs).
+
+```
+Parameters:
+  description       string  What went wrong (required)
+  severity          string  "low" | "medium" | "high" | "critical" (default: "medium")
+  file_path         string  Source file this bug relates to
+  line_start        int     Starting line number
+  line_end          int     Ending line number
+  root_cause        string  Root cause description
+  fix_description   string  How it was / should be fixed
+  project_root      string  Project root directory (default: ".")
 ```
 
 ---
 
-## Security
+#### `neural_add_task`
+Manually create a task node.
 
-- **Automatic redaction**: API keys, JWT tokens, connection strings, private keys, passwords are masked before storage
-- **AST-aware**: Variables named `secret`, `password`, `token`, `api_key`, etc. have values replaced with `[REDACTED]`
-- **Custom patterns**: Add your own regex via `/neural-config` → `add_redaction_pattern`
-- **Whitelist**: Mark false positives to prevent over-redaction
-- **Local storage only**: The index lives in `.neural-memory/` inside your project and is excluded from git by default
+```
+Parameters:
+  title           string  Task title (required)
+  phase_name      string  Phase to attach this task to (creates phase if missing)
+  priority        string  "low" | "medium" | "high" (default: "medium")
+  task_status     string  "pending" | "in_progress" | "done" (default: "pending")
+  related_files   list    File paths this task relates to
+  project_root    string  Project root directory (default: ".")
+```
+
+---
+
+## Context Log Auto-Import
+
+Neural Memory automatically reads your `.claude/` context files on every `/neural-index`:
+
+**`.claude/context-log-gotchas.md`** → Bug nodes
+
+Each entry matching this format becomes a BUG node:
+```markdown
+## 2024-01-15 — Short description of the bug
+
+**File**: `neural_memory/models.py`
+**Root cause**: What caused it.
+**Fix**: How it was resolved.
+```
+
+**`.claude/context-log-tasks-01.md`** (and `tasks-02.md`, etc.) → Phase + Task nodes
+
+```markdown
+# Phase 1 — Core data model
+
+## Fix 1 — Add BUG node type
+
+**Status**: [x] DONE
+**File**: `neural_memory/models.py` lines 10-40
+```
+
+The H1 heading becomes a PHASE node; each `## Fix N — title` becomes a TASK node with a `PHASE_CONTAINS` edge and `RELATES_TO` edges to matched code nodes.
+
+Re-parsing is mtime-gated — files are only re-imported when they change.
+
+---
+
+## LSP Enrichment
+
+If Pyright or pylsp is installed, neural memory enriches nodes with `importance >= 0.3`:
+
+```bash
+# Install Pyright (recommended)
+npm install -g pyright
+
+# Or pylsp
+pip install python-lsp-server
+```
+
+Enriched nodes gain:
+- `lsp_hover_doc` — resolved type signatures and docstrings
+- `lsp_diagnostics` — type errors and warnings at definition site
+
+Disable LSP enrichment:
+```
+/neural-config  →  set_lsp: none
+```
+
+---
+
+## Semantic Search
+
+Requires numpy:
+```bash
+pip install "neural-memory[vectors] @ git+https://github.com/Yakoub-ai/neural-memory.git"
+```
+
+Neural Memory builds **128-dimensional composite embeddings**:
+- **100 dims** — TF-IDF corpus vectorized with Truncated SVD (content semantics)
+- **28 dims** — structural graph features: node type one-hot (14), in/out degree (2), edge profile (10), metadata (2)
+
+Search algorithm:
+1. **Seed phase** — cosine similarity against all embeddings, take top-K seeds
+2. **Branch expansion** — traverse graph edges from seeds, apply decay by hop count
+3. **Rank phase** — combine cosine score × importance × (1 / hop_penalty)
+
+Embeddings auto-recompute when model version changes (version stamped in DB).
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     Claude Code                          │
+│   /neural-index  /neural-query  /neural-inspect  ...    │
+└────────────────────────┬─────────────────────────────────┘
+                         │ MCP (stdio JSON-RPC)
+┌────────────────────────▼─────────────────────────────────┐
+│                  MCP Server                              │
+│              neural_memory/server.py                     │
+└──────┬─────────────┬──────────────┬───────────────┬──────┘
+       │             │              │               │
+  ┌────▼────┐  ┌─────▼─────┐ ┌────▼────┐  ┌──────▼──────┐
+  │ Indexer │  │  Search   │ │  Graph  │  │  Dashboard  │
+  │  (AST + │  │(Embedding │ │(Inspect │  │  (D3.js     │
+  │ context │  │ + branch) │ │+ callers│  │  3 views)   │
+  │  logs)  │  └─────┬─────┘ │  + LSP) │  └─────────────┘
+  └────┬────┘        │       └────┬────┘
+       │             │            │
+  ┌────▼─────────────▼────────────▼────┐
+  │            SQLite Storage          │
+  │         .neural-memory/memory.db   │
+  │  nodes | edges | embeddings |      │
+  │  file_hashes | index_state         │
+  └────────────────────────────────────┘
+```
+
+### Three Node Layers
+
+```
+Codebase layer          Bugs layer           Tasks layer
+──────────────          ──────────           ───────────
+module                  bug                  phase
+class                                        task
+function
+method
+project_overview
+directory_overview
+```
+
+### Edge Types
+
+| Type | Connects |
+|------|----------|
+| `calls` | function → function |
+| `imports` | module → module |
+| `inherits` | class → class |
+| `contains` | parent → child |
+| `relates_to` | bug/task → code node |
+| `fixed_by` | bug → fix function |
+| `phase_contains` | phase → task |
+| `task_contains` | task → subtask |
+
+---
+
+## Data Storage
+
+All data lives in `.neural-memory/` inside your project:
+
+```
+.neural-memory/
+  memory.db          # SQLite: nodes, edges, embeddings, state
+  config.json        # Your settings
+  d3.min.js          # Cached D3 library (auto-downloaded)
+  dashboard.html     # Generated interactive visualization
+```
+
+`.neural-memory/` should be in your `.gitignore` (added automatically).
+
+---
+
+## Privacy & Security
+
+- **Local only** — the index never leaves your machine unless you use `api` or `both` mode
+- **Automatic redaction** — secrets matching common patterns are replaced with `[REDACTED]` before any storage or API call
+- **AST-aware** — variables named `secret`, `password`, `token`, `api_key`, `auth`, `credential` have their values redacted
+- **Configurable** — add custom regex patterns, whitelist false positives via `/neural-config`
+- **Mode control** — use `ast_only` for air-gapped or sensitive projects
+
+---
+
+## Configuration
+
+Settings are stored in `.neural-memory/config.json` and editable via `/neural-config`.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `index_mode` | `both` | `ast_only` / `api` / `both` |
+| `include_patterns` | `["**/*.py"]` | Files to index |
+| `exclude_patterns` | `["**/.venv/**", ...]` | Files to skip |
+| `importance_threshold` | `0.2` | Min importance for API summarization |
+| `staleness_threshold` | `5` | Commits behind before warning |
+| `lsp_enabled` | `true` | Enable LSP enrichment |
+| `lsp_server` | `"auto"` | `"auto"` / `"pyright-langserver"` / `"pylsp"` / `"none"` |
 
 ---
 
 ## Troubleshooting
 
+**`sqlite3` error on first index**
+Delete `.neural-memory/memory.db` and re-run `/neural-index`. The schema will be recreated.
+
+**Bug/task nodes not appearing in search**
+Run `/neural-index` (not `/neural-update`) to force re-import of context logs.
+
+**Embeddings not computing**
+Install numpy: `pip install "neural-memory[vectors]"`. Without it, search falls back to name/summary text matching.
+
+**LSP enrichment skipped**
+Install `pyright` (`npm install -g pyright`) or `pylsp` (`pip install python-lsp-server`). Or disable with `set_lsp: none`.
+
+**`neural-memory: command not found`**
+The pip scripts directory isn't on PATH. Use `python -m neural_memory.server` in your MCP config instead.
+
 ```bash
-neural-memory-setup doctor
+neural-memory-setup doctor   # full diagnosis
 ```
-
-Checks Python version, sqlite3, mcp, pydantic, and PATH configuration — reports exactly what needs fixing.
-
-**Common issues:**
-
-- `neural-memory: command not found` — the pip install's bin directory isn't on your PATH. Either add it or use the `python -m neural_memory.server` fallback in your MCP config.
-- `sqlite3` errors — very rare, but some minimal Python builds omit sqlite3. Reinstall Python from python.org.
-- Index feels stale — run `/neural-update` after code changes, or `/neural-index` for a full rebuild.
-
----
-
-## Roadmap
-
-### v1.1
-- [ ] Duplicate code detection (AST-normalized similarity)
-- [ ] Multi-language support (TypeScript via tree-sitter)
-- [ ] Export graph to visualization tools
-
-### v1.2
-- [ ] Semantic search (embeddings-based)
-- [ ] Auto-documentation generation
-- [ ] PR impact analysis
 
 ---
 
@@ -224,10 +531,8 @@ Checks Python version, sqlite3, mcp, pydantic, and PATH configuration — report
 ```bash
 git clone https://github.com/Yakoub-ai/neural-memory.git
 cd neural-memory
-pip install -e .
+pip install -e ".[all]"
 ```
-
-PRs welcome. Open an issue first for significant changes.
 
 ---
 

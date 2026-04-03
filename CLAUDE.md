@@ -12,11 +12,24 @@ Neural Memory is a knowledge graph that maps your codebase into layered, navigab
 
 ## How It Works
 
-The plugin parses your Python codebase into a directed graph:
-- **Nodes**: Functions, classes, methods, modules (with layered summaries)
-- **Edges**: Calls, imports, inheritance, containment
-- **Summaries**: Short (1-liner) and detailed — understand code without reading it
-- **Security**: Secrets, API keys, and sensitive values are automatically redacted
+The plugin parses your Python codebase into a three-layer directed graph:
+
+**Codebase layer** — AST-parsed nodes, LSP-enriched:
+- Nodes: modules, classes, functions, methods, project/directory overviews
+- Edges: calls, imports, inheritance, containment
+
+**Bugs layer** — auto-imported from `.claude/context-log-gotchas.md` or via MCP tool:
+- Nodes: bug entries with severity, status, root cause, fix description
+- Edges: `RELATES_TO` code nodes by file path
+
+**Tasks layer** — auto-imported from `.claude/context-log-tasks-XX.md` or via MCP tool:
+- Nodes: phases, tasks with status and priority
+- Edges: `PHASE_CONTAINS` task, `RELATES_TO` code nodes
+
+**Embeddings**: 128-dim composite (100-dim TF-IDF+SVD content + 28-dim structural graph features)
+**Search**: three-phase branch search — seed by cosine similarity → graph expansion → weighted rank
+**Security**: Secrets, API keys, and sensitive values are automatically redacted
+**LSP**: Pyright/pylsp enrichment for high-importance nodes (type signatures, diagnostics)
 
 ## MCP Server
 
@@ -43,9 +56,12 @@ If the index is stale or uninitialized, inform the user and suggest the appropri
 
 | Command | Tool | Purpose |
 |---------|------|---------|
-| `/neural-index` | `neural_index` | Full codebase index |
+| `/neural-index` | `neural_index` | Full codebase index (all three layers) |
 | `/neural-update` | `neural_update` | Incremental git-based update |
-| `/neural-query` | `neural_query` | Search the knowledge graph |
+| `/neural-query` | `neural_query` | Semantic search (code + bugs + tasks) |
 | `/neural-inspect` | `neural_inspect` | Deep-dive into a node |
 | `/neural-status` | `neural_status` | Health and staleness check |
 | `/neural-config` | `neural_config` | View/modify settings |
+| — | `neural_visualize_dashboard` | Interactive D3 dashboard (3 views, filters) |
+| — | `neural_add_bug` | Manually add a bug node |
+| — | `neural_add_task` | Manually add a task node |

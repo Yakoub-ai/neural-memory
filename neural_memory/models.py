@@ -10,6 +10,7 @@ from typing import Optional
 
 
 class NodeType(str, Enum):
+    # ── Codebase (AST-parsed) ──
     MODULE = "module"
     CLASS = "class"
     FUNCTION = "function"
@@ -18,15 +19,31 @@ class NodeType(str, Enum):
     EXPORT = "export"
     TYPE_DEF = "type_def"
     OTHER = "other"
+    # ── Codebase (generated overviews) ──
+    PROJECT_OVERVIEW = "project_overview"
+    DIRECTORY_OVERVIEW = "directory_overview"
+    # ── Bugs ──
+    BUG = "bug"
+    # ── Tasks / Project lifecycle ──
+    PHASE = "phase"
+    TASK = "task"
+    SUBTASK = "subtask"
 
 
 class EdgeType(str, Enum):
+    # ── Code structure ──
     CALLS = "calls"
     IMPORTS = "imports"
     INHERITS = "inherits"
     DEFINES = "defines"
     USES = "uses"
     CONTAINS = "contains"
+    # ── Cross-layer (code ↔ bugs/tasks) ──
+    RELATES_TO = "relates_to"       # bug/task → code node
+    FIXED_BY = "fixed_by"           # bug → code node that fixed it
+    # ── Task hierarchy ──
+    PHASE_CONTAINS = "phase_contains"   # phase → task
+    TASK_CONTAINS = "task_contains"     # task → subtask
 
 
 class SummaryMode(str, Enum):
@@ -70,6 +87,19 @@ class NeuralNode:
     raw_code: str = ""
     # Redacted flag
     has_redacted_content: bool = False
+    # ── Layer / category ──────────────────────────────────────────────────────
+    # "codebase" | "bugs" | "tasks"  — used for visualization filtering
+    category: str = "codebase"
+    # ── Bug-specific fields ───────────────────────────────────────────────────
+    severity: str = ""              # low / medium / high / critical
+    bug_status: str = ""            # open / fixed
+    # ── Task-specific fields ──────────────────────────────────────────────────
+    task_status: str = ""           # pending / in_progress / done
+    priority: str = ""              # low / medium / high
+    # ── LSP-enrichment ────────────────────────────────────────────────────────
+    lsp_type_info: str = ""         # resolved type signatures from hover
+    lsp_diagnostics: list[str] = field(default_factory=list)
+    lsp_hover_doc: str = ""         # documentation text from LSP hover
 
     def compute_hash(self, source: str) -> str:
         """Compute content hash from source code."""
@@ -84,9 +114,12 @@ class NeuralNode:
 
     @classmethod
     def from_dict(cls, data: dict) -> NeuralNode:
-        data["node_type"] = NodeType(data["node_type"])
-        data["summary_mode"] = SummaryMode(data["summary_mode"])
-        return cls(**data)
+        import dataclasses
+        known = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+        filtered["node_type"] = NodeType(filtered["node_type"])
+        filtered["summary_mode"] = SummaryMode(filtered["summary_mode"])
+        return cls(**filtered)
 
 
 @dataclass
@@ -129,4 +162,34 @@ class IndexState:
     @classmethod
     def from_dict(cls, data: dict) -> IndexState:
         data["index_mode"] = IndexMode(data["index_mode"])
+        return cls(**data)
+
+
+@dataclass
+class EmbeddingMeta:
+    """Corpus-level metadata for the embedding space.
+
+    Stores the vocabulary, IDF weights, and SVD projection matrix so that
+    new queries and incremental nodes can be projected into the same space
+    without re-fitting the whole corpus.
+    """
+    vocab: list[str]            # ordered token list (index → token)
+    idf: list[float]            # per-token IDF weights (len == len(vocab))
+    svd_components: list[list[float]]  # shape [n_components, vocab_size]
+    n_components: int           # content vector dimensions (e.g. 100)
+    model_version: str = "tfidf-svd-v1"
+    total_nodes: int = 0        # node count when this was last fit
+
+    def to_dict(self) -> dict:
+        return {
+            "vocab": self.vocab,
+            "idf": self.idf,
+            "svd_components": self.svd_components,
+            "n_components": self.n_components,
+            "model_version": self.model_version,
+            "total_nodes": self.total_nodes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "EmbeddingMeta":
         return cls(**data)

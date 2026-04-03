@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Optional
 
 from .config import NeuralConfig, load_config
+from .context_parser import import_context_logs
+from .embeddings import compute_all_embeddings, update_embeddings, is_available as embeddings_available
+from .lsp_client import LSPClient, is_lsp_available
 from .models import NeuralNode, NeuralEdge, IndexMode, IndexState
+from .overview import generate_and_store_overviews
 from .parser import parse_file, resolve_edges
 from .redactor import Redactor
 from .storage import Storage
@@ -87,6 +91,35 @@ def _get_commits_behind(since_commit: str, project_root: str) -> int:
     return 0
 
 
+def _enrich_with_lsp(
+    storage,
+    all_nodes: dict,
+    project_root: str,
+    lsp_server: str = "auto",
+) -> None:
+    """Enrich high-importance code nodes with LSP hover info and diagnostics."""
+    high_importance = [
+        n for n in all_nodes.values()
+        if n.importance >= 0.3 and n.file_path and not n.file_path.startswith("__")
+    ]
+    if not high_importance:
+        return
+
+    with LSPClient(project_root, server=lsp_server) as lsp:
+        if not lsp._proc:
+            return  # LSP failed to start
+        for node in high_importance:
+            try:
+                hover_text = lsp.hover(node.file_path, node.line_start or 1)
+                diags = lsp.diagnostics(node.file_path)
+                if hover_text or diags:
+                    node.lsp_hover_doc = (hover_text or "")[:500]
+                    node.lsp_diagnostics = diags[:10]
+                    storage.upsert_node(node)
+            except Exception:
+                pass
+
+
 def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -> dict:
     """Perform a full index of the codebase.
 
@@ -106,6 +139,10 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
         "nodes_created": 0,
         "edges_created": 0,
         "redactions": 0,
+        "embeddings_computed": 0,
+        "bugs_imported": 0,
+        "tasks_imported": 0,
+        "overview_nodes": 0,
         "errors": [],
     }
 
@@ -159,8 +196,37 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
             except Exception:
                 pass
 
+        # Phase 4.5: Import context logs (bugs, tasks, phases)
+        try:
+            log_stats = import_context_logs(storage, config.project_root)
+            stats["bugs_imported"] = log_stats["bugs_imported"]
+            stats["tasks_imported"] = log_stats["tasks_imported"] + log_stats["phases_imported"]
+        except Exception as e:
+            stats["errors"].append(f"context_logs: {e}")
+
         # Phase 5: Compute importance
         compute_importance(storage)
+
+        # Phase 5.1: LSP enrichment — add type info + diagnostics to high-importance nodes
+        lsp_server_pref = config.lsp_server if hasattr(config, "lsp_server") else "auto"
+        lsp_on = getattr(config, "lsp_enabled", True)
+        if lsp_on and lsp_server_pref != "none" and is_lsp_available():
+            try:
+                _enrich_with_lsp(storage, all_nodes, config.project_root, lsp_server_pref)
+            except Exception as e:
+                stats["errors"].append(f"lsp: {e}")
+
+        # Phase 5.2: Generate overview nodes (project + directory summaries)
+        try:
+            ov_stats = generate_and_store_overviews(storage)
+            stats["overview_nodes"] = ov_stats["project_overviews"] + ov_stats["directory_overviews"]
+        except Exception as e:
+            stats["errors"].append(f"overviews: {e}")
+
+        # Phase 5.5: Compute embeddings for ALL nodes (code + bugs + tasks + overviews)
+        if embeddings_available():
+            all_storage_nodes = storage.get_all_nodes()
+            stats["embeddings_computed"] = compute_all_embeddings(storage, all_storage_nodes)
 
         # Phase 6: Generate summaries (after importance is computed)
         if config.index_mode != IndexMode.AST_ONLY:
@@ -238,8 +304,19 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
             except Exception:
                 pass
 
-        # Removed files
-        removed_files = set(indexed_files.keys()) - current_files
+        # Removed files — only remove files whose extension is covered by include_patterns.
+        # Context logs (.md), overview markers, etc. are stored in file_hashes but are NOT
+        # Python source files; removing them would delete bug/task nodes.
+        # Extract allowed extensions from include patterns (e.g. "**/*.py" → ".py").
+        tracked_exts: set[str] = set()
+        for pat in config.include_patterns:
+            if "." in pat:
+                tracked_exts.add("." + pat.rsplit(".", 1)[1])
+        candidate_removed = set(indexed_files.keys()) - current_files
+        removed_files = {
+            f for f in candidate_removed
+            if any(f.endswith(ext) for ext in tracked_exts)
+        }
 
         # Process removals
         for f in removed_files:
@@ -302,6 +379,20 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
 
         # Recompute importance
         compute_importance(storage)
+
+        # Regenerate overview nodes (cheap, always refresh)
+        try:
+            generate_and_store_overviews(storage)
+        except Exception:
+            pass
+
+        # Re-embed changed nodes (incremental projection)
+        if embeddings_available() and changed_files:
+            changed_ids: set[str] = set()
+            for f in changed_files:
+                for node in storage.get_nodes_by_file(f):
+                    changed_ids.add(node.id)
+            update_embeddings(storage, changed_ids)
 
         # Update state
         now = datetime.now(timezone.utc).isoformat()

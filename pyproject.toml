@@ -1,7 +1,7 @@
 [project]
 name = "neural-memory"
-version = "0.1.1"
-description = "A neural knowledge graph for codebases — layered code understanding for Claude Code"
+version = "0.2.0"
+description = "A neural knowledge graph for codebases — three-layer code/bugs/tasks understanding for Claude Code"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -35,6 +35,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+vectors = [
+    "numpy>=1.24.0",
+]
+viz = [
+    "numpy>=1.24.0",
+    "plotly>=5.15.0",
+]
+all = [
+    "neural-memory[vectors,viz]",
+]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

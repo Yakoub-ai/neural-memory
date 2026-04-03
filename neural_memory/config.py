@@ -54,6 +54,9 @@ class NeuralConfig:
     staleness_threshold: int = 5
     # Importance threshold — nodes below this are typed as OTHER
     importance_threshold: float = 0.2
+    # LSP enrichment settings
+    lsp_enabled: bool = True        # attempt LSP enrichment during indexing
+    lsp_server: str = "auto"        # "auto" | "pyright-langserver" | "pylsp" | "none"
 
     def __post_init__(self):
         if isinstance(self.index_mode, str):
