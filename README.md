@@ -236,6 +236,27 @@ Parameters:
 
 Opens `http://localhost:7891` with three views: Hierarchy treemap, Semantic radial tree, Force-directed graph.
 
+**Running the dashboard outside Claude Code:**
+
+```bash
+# Start the dashboard server (opens browser automatically)
+neural-memory-viz
+
+# Custom port
+neural-memory-viz --port 8080
+
+# Serve without opening the browser
+neural-memory-viz --no-browser
+
+# Point to a different project root
+neural-memory-viz --project-root /path/to/your/project
+```
+
+Press `Ctrl+C` to stop.
+
+> **Note:** If `neural-memory-viz` is not found, the pip scripts directory may not be on PATH.
+> Run `python -m neural_memory.serve` as a fallback, or add the scripts directory to PATH.
+
 ---
 
 #### `neural_stop_serve`

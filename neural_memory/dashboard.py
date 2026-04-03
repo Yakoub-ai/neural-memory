@@ -271,7 +271,10 @@ def _html_body() -> str:
     <div id="graph-controls" style="display:none">
       <div class="sb-head">Edge Types</div>
       <div id="edge-toggles"></div>
-      <div class="sb-head" style="margin-top:10px">Graph Options</div>
+      <div class="sb-head" style="margin-top:10px">Node Spacing</div>
+      <input type="range" id="air-slider" min="0" max="10" step="1" value="0">
+      <div class="range-labels"><span>Tight</span><span>Spread</span></div>
+      <div class="sb-head" style="margin-top:6px">Graph Options</div>
       <div class="filter-row">
         <input type="checkbox" id="label-toggle" checked>
         <label for="label-toggle">Show labels</label>
@@ -342,23 +345,23 @@ function startApp() {
 
   // ── Node / edge style configs ──────────────────────────────────────────────
   var NODE_STYLE = {
-    module:             ['#58a6ff',  90, 34],
-    class:              ['#d2a8ff', 100, 36],
-    function:           ['#79c0ff',  72, 30],
-    method:             ['#79c0ff',  72, 28],
-    project_overview:   ['#f0e68c', 110, 36],
-    directory_overview: ['#8b949e',  90, 32],
-    config:             ['#e3b341',  72, 28],
-    export:             ['#56d364',  72, 26],
-    type_def:           ['#bc8cff',  76, 28],
-    other:              ['#8b949e',  66, 26],
-    bug:                ['#f85149',  84, 32],
-    phase:              ['#3fb950', 100, 36],
-    task:               ['#3fb950',  84, 30],
-    subtask:            ['#56d364',  72, 26],
-    database:           ['#d2a8ff', 110, 38],
-    table:              ['#b28cf5',  90, 32],
-    column:             ['#9c6fe0',  72, 26]
+    module:             ['#58a6ff', 112, 42],
+    class:              ['#d2a8ff', 122, 44],
+    function:           ['#79c0ff',  92, 38],
+    method:             ['#79c0ff',  92, 36],
+    project_overview:   ['#f0e68c', 132, 44],
+    directory_overview: ['#8b949e', 112, 40],
+    config:             ['#e3b341',  92, 36],
+    export:             ['#56d364',  92, 34],
+    type_def:           ['#bc8cff',  96, 36],
+    other:              ['#8b949e',  86, 34],
+    bug:                ['#f85149', 106, 40],
+    phase:              ['#3fb950', 122, 44],
+    task:               ['#3fb950', 106, 38],
+    subtask:            ['#56d364',  92, 34],
+    database:           ['#d2a8ff', 132, 46],
+    table:              ['#b28cf5', 112, 40],
+    column:             ['#9c6fe0',  92, 34]
   };
 
   var EDGE_STYLE = {
@@ -646,7 +649,7 @@ function startApp() {
             }
             return prefix + params.name;
           },
-          fontSize: 11,
+          fontSize: 14,
           fontWeight: 500,
           color: '#f0f6fc',
           overflow: 'truncate',
@@ -654,8 +657,8 @@ function startApp() {
         },
         upperLabel: {
           show: true,
-          height: 22,
-          fontSize: 11,
+          height: 26,
+          fontSize: 14,
           fontWeight: 600,
           color: '#f0f6fc',
           overflow: 'truncate',
@@ -676,18 +679,6 @@ function startApp() {
       if (!params.data || !params.data.id) return;
       var n = RAW.nodes.find(function(x) { return x.id === params.data.id; });
       if (n) showDetail(n);
-    });
-
-    // Zoom-responsive font sizing via mousewheel tracking
-    chart.getZr().off('mousewheel');
-    var _tmTimer = null;
-    chart.getZr().on('mousewheel', function(e) {
-      _treemapZoom = Math.max(0.5, Math.min(5, _treemapZoom * (e.wheelDelta > 0 ? 1.1 : 1 / 1.1)));
-      clearTimeout(_tmTimer);
-      _tmTimer = setTimeout(function() {
-        var fs = Math.min(24, Math.max(9, Math.round(11 * _treemapZoom)));
-        chart.setOption({ series: [{ label: { fontSize: fs }, upperLabel: { fontSize: fs } }] }, false);
-      }, 80);
     });
   }
 
@@ -819,11 +810,11 @@ function startApp() {
           formatter: function(params) {
             if (params.data.label && params.data.label.show === false) return '';
             var n = params.data.name || '';
-            return n.length > 18 ? n.slice(0, 16) + '\u2026' : n;
+            return n.length > 22 ? n.slice(0, 20) + '\u2026' : n;
           },
-          fontSize: 10,
+          fontSize: 12,
           color: '#c9d1d9',
-          distance: 10,
+          distance: 12,
           rotate: 0
         },
         leaves: {
@@ -832,13 +823,13 @@ function startApp() {
             position: 'right',
             verticalAlign: 'middle',
             align: 'left',
-            fontSize: 10,
+            fontSize: 12,
             color: '#8b949e',
-            distance: 8,
+            distance: 10,
             formatter: function(params) {
               if (params.data.label && params.data.label.show === false) return '';
               var n = params.data.name || '';
-              return n.length > 16 ? n.slice(0, 14) + '\u2026' : n;
+              return n.length > 20 ? n.slice(0, 18) + '\u2026' : n;
             }
           }
         },
@@ -875,8 +866,8 @@ function startApp() {
       var color = nodeColor(n);
       var catIdx = CATEGORY_LIST.indexOf(n.node_type);
       var w = nodeW(n);
-      // ~7px per char at fontSize 10; scale with zoom so more chars show when zoomed in
-      var maxChars = Math.max(4, Math.floor((w * Math.max(zoom, 1) - 12) / 7));
+      // ~10px per char at fontSize 16; scale with zoom so more chars show when zoomed in
+      var maxChars = Math.max(4, Math.floor((w * Math.max(zoom, 1) - 12) / 10));
       var label = n.name.length > maxChars ? n.name.slice(0, maxChars - 1) + '\u2026' : n.name;
       return {
         id: n.id,
@@ -896,7 +887,7 @@ function startApp() {
         label: {
           show: true,
           formatter: label,
-          fontSize: Math.min(28, Math.max(8, Math.round(10 * zoom))),
+          fontSize: Math.min(52, Math.max(14, Math.round(16 * zoom))),
           color: '#e6edf3',
           position: 'inside',
           overflow: 'truncate',
@@ -985,29 +976,21 @@ function startApp() {
         animationEasingUpdate: 'cubicOut',
         force: (function() {
           var nc = gNodes.length;
-          var repBase = Math.max(250, 150 + nc * 3);
+          var airVal = parseInt((document.getElementById('air-slider') || {}).value || 0);
+          var repBase = Math.max(260, 160 + nc * 2) + airVal * 60;
           return {
-            repulsion: [repBase, repBase * 2.5],
-            edgeLength: [100, 200],
-            gravity: 0.05,
-            friction: 0.6,
-            layoutAnimation: true
+            repulsion: repBase,
+            edgeLength: [80 + airVal * 10, 160 + airVal * 20],
+            gravity: Math.max(0.04, 0.15 - airVal * 0.01),
+            friction: 1,
+            layoutAnimation: false
           };
         })(),
-        emphasis: {
-          focus: 'adjacency',
-          blurScope: 'global',
-          scale: false,
-          lineStyle: { width: 3, opacity: 1 }
-        },
-        blur: {
-          itemStyle: { opacity: 0.1 },
-          lineStyle: { opacity: 0.05 }
-        },
+        emphasis: { scale: false },
         categories: categories,
         data: gNodes,
         links: links,
-        lineStyle: { opacity: 0.7 }
+        lineStyle: { opacity: 0.65 }
       }]
     }, true);
 
@@ -1015,10 +998,48 @@ function startApp() {
     chart.off('dblclick');
     chart.off('graphroam');
 
+    var _focusedId = null;
+
+    function _applyFocus(focusId) {
+      var connSet = {};
+      connSet[focusId] = true;
+      allEdges.forEach(function(e) {
+        if (e.source_id === focusId) connSet[e.target_id] = true;
+        if (e.target_id === focusId) connSet[e.source_id] = true;
+      });
+      var updNodes = buildGraphNodes(nodes, _graphZoom).map(function(d) {
+        var inFocus = connSet[d._id];
+        d.itemStyle = Object.assign({}, d.itemStyle, { opacity: inFocus ? 1 : 0.06 });
+        d.label = Object.assign({}, d.label, { opacity: inFocus ? 1 : 0 });
+        return d;
+      });
+      var updLinks = buildGraphLinks(nodes, allEdges).map(function(l) {
+        var inFocus = connSet[l.source] && connSet[l.target];
+        l.lineStyle = Object.assign({}, l.lineStyle, { opacity: inFocus ? 0.8 : 0.03 });
+        return l;
+      });
+      chart.setOption({ series: [{ data: updNodes, links: updLinks, force: { layoutAnimation: false } }] }, false);
+    }
+
+    function _clearFocus() {
+      _focusedId = null;
+      var updNodes = buildGraphNodes(nodes, _graphZoom);
+      var updLinks = buildGraphLinks(nodes, allEdges);
+      chart.setOption({ series: [{ data: updNodes, links: updLinks }] }, false);
+    }
+
     chart.on('click', function(params) {
       if (params.dataType !== 'node') return;
-      var n = RAW.nodes.find(function(x) { return x.id === (params.data._id || params.data.id); });
+      var nid = params.data._id || params.data.id;
+      var n = RAW.nodes.find(function(x) { return x.id === nid; });
       if (n) showDetail(n);
+      _focusedId = nid;
+      _applyFocus(nid);
+    });
+
+    // Click on background → clear focus
+    chart.getZr().on('click', function(evt) {
+      if (!evt.target && _focusedId) _clearFocus();
     });
 
     chart.on('dblclick', function(params) {
@@ -1027,20 +1048,19 @@ function startApp() {
       focusSubgraph(nid, nodes, allEdges);
     });
 
-    // Reset 2-hop focus on background double-click
     chart.getZr().on('dblclick', function(evt) {
       if (!evt.target) drawGraph();
     });
 
-    // Zoom-responsive label sizing: scale font and maxChars with cumulative zoom
+    // Zoom-responsive label sizing
     var _zoomTimer = null;
     chart.on('graphroam', function(params) {
-      if (!params.zoom) return; // pan event, not zoom
+      if (!params.zoom) return;
       _graphZoom = Math.max(0.3, Math.min(6, _graphZoom * params.zoom));
       clearTimeout(_zoomTimer);
       _zoomTimer = setTimeout(function() {
-        var updated = buildGraphNodes(nodes, _graphZoom);
-        chart.setOption({ series: [{ data: updated }] }, false);
+        if (_focusedId) { _applyFocus(_focusedId); return; }
+        chart.setOption({ series: [{ data: buildGraphNodes(nodes, _graphZoom) }] }, false);
       }, 80);
     });
   }
@@ -1218,6 +1238,29 @@ function startApp() {
       labelCb.addEventListener('change', function() {
         var chart = charts['graph'];
         if (chart) chart.setOption({ series: [{ label: { show: labelCb.checked } }] }, false);
+      });
+    }
+
+    // Air (node spacing) slider — triggers brief re-layout then re-freezes
+    var airSlider = document.getElementById('air-slider');
+    var _airTimer = null;
+    if (airSlider) {
+      airSlider.addEventListener('input', function() {
+        var chart = charts['graph'];
+        if (!chart || state.tab !== 'graph') return;
+        var air = parseInt(airSlider.value);
+        var nc = chart.getOption().series[0].data.length;
+        var repBase = Math.max(120, 80 + nc * 1.5) + air * 50;
+        chart.setOption({ series: [{ force: {
+          repulsion: repBase,
+          edgeLength: [60 + air * 8, 120 + air * 16],
+          gravity: Math.max(0.05, 0.18 - air * 0.012),
+          layoutAnimation: true
+        }}] }, false);
+        clearTimeout(_airTimer);
+        _airTimer = setTimeout(function() {
+          chart.setOption({ series: [{ force: { layoutAnimation: false } }] }, false);
+        }, 1200);
       });
     }
 
