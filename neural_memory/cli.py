@@ -14,9 +14,41 @@ from pathlib import Path
 HOOK_TEXT = """
 ## Neural Memory Agent Hook
 
-On each invocation, check neural memory staleness by running the `neural_status` tool.
-If the index is stale or uninitialized, inform the user and suggest the appropriate action.
+Neural memory context is automatically injected before each prompt via the UserPromptSubmit hook.
+If the index appears stale or uninitialized in the context header, suggest the appropriate action:
+- Uninitialized: run `/neural-index`
+- Stale: run `/neural-update`
+
+Use `neural_context` (MCP tool) for on-demand context snapshots, and `neural_query`/`neural_inspect` for deep exploration.
 """
+
+# Claude Code hooks block to inject into settings.json.
+# UserPromptSubmit: inject compact context before each user message.
+# Stop: archive completed items and auto-update stale index on session end.
+HOOKS_CONFIG = {
+    "UserPromptSubmit": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "neural-context-hook"
+                }
+            ]
+        }
+    ],
+    "Stop": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "neural-session-hook"
+                }
+            ]
+        }
+    ]
+}
 
 MCP_ENTRY = {
     "neural-memory": {
@@ -106,6 +138,41 @@ def _install_skills(target: Path) -> int:
             shutil.copy2(skill_md, dest / f"{skill_dir.name}.md")
             copied += 1
     return copied
+
+
+def _install_hooks(settings_path: Path) -> bool:
+    """Merge neural-memory hooks into a Claude Code settings.json.
+
+    Merges safely — does not overwrite hooks from other tools.
+    Returns True if hooks were added, False if already present.
+    """
+    data: dict = {}
+    if settings_path.exists():
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+
+    hooks = data.setdefault("hooks", {})
+
+    # Check if already installed (keyed by the command name)
+    for event_hooks in hooks.values():
+        for entry in event_hooks:
+            for h in entry.get("hooks", []):
+                if h.get("command") in ("neural-context-hook", "neural-session-hook"):
+                    return False  # already installed
+
+    # Merge each hook event
+    for event, entries in HOOKS_CONFIG.items():
+        if event not in hooks:
+            hooks[event] = entries
+        else:
+            # Append our entries if not already present
+            hooks[event].extend(entries)
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return True
 
 
 def _append_hook(claude_md: Path) -> bool:
@@ -215,7 +282,20 @@ def cmd_install() -> None:
     else:
         print("  Skipped\n")
 
-    # 4. CLAUDE.md hook
+    # 4. Claude Code hooks (settings.json)
+    print("Install Claude Code hooks for automatic context injection?")
+    print("  UserPromptSubmit: auto-injects compact context before each message (~500 tokens)")
+    print("  Stop: archives completed tasks/bugs and auto-updates stale index on session end")
+    if input("  [y/N] > ").strip().lower() == "y":
+        added = _install_hooks(settings_path)
+        if added:
+            print(f"  [OK] Hooks installed in {settings_path}\n")
+        else:
+            print("  (hooks already installed)\n")
+    else:
+        print("  Skipped\n")
+
+    # 5. CLAUDE.md hook
     claude_md = project_root / "CLAUDE.md"
     print("Add neural-memory agent hook to CLAUDE.md?")
     print("  (tells Claude to auto-check index staleness each session)")

@@ -39,6 +39,7 @@ class QueryInput(BaseModel):
     project_root: str = Field(default=".", description="Project root directory path")
     limit: int = Field(default=10, description="Max results to return", ge=1, le=50)
     language: Optional[str] = Field(default=None, description="Filter results to a specific language (e.g. 'python', 'typescript', 'rust')")
+    include_archived: bool = Field(default=False, description="Include archived (completed/fixed) bugs and tasks in results")
 
 
 class InspectInput(BaseModel):
@@ -82,6 +83,22 @@ class VisualizeInput(BaseModel):
         default="node_type",
         description="Color grouping for vector view: 'node_type' or 'file'",
     )
+
+
+class ContextInput(BaseModel):
+    """Input for the compact context tool."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    project_root: str = Field(default=".", description="Project root directory path")
+    query_hint: Optional[str] = Field(default=None, description="Optional prompt or keyword to drive semantic pre-fetch of relevant nodes")
+    token_budget: int = Field(default=500, description="Approximate token budget for the response", ge=100, le=2000)
+
+
+class ArchiveInput(BaseModel):
+    """Input for manual archive/unarchive operations."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    node_id: str = Field(..., description="Node ID to archive or unarchive")
+    action: str = Field(default="archive", description="Action: 'archive' or 'unarchive'")
+    project_root: str = Field(default=".", description="Project root directory path")
 
 
 # ── Tools ──
@@ -211,6 +228,10 @@ async def neural_query(params: QueryInput) -> str:
             sem_results = [r for r in sem_results if r.node.language == params.language]
             sem_results = sem_results[:params.limit]
 
+        # Filter out archived items unless explicitly requested
+        if not params.include_archived and sem_results:
+            sem_results = [r for r in sem_results if not r.node.archived]
+
         if sem_results:
             lang_label = f" [{params.language}]" if params.language else ""
             search_mode = "semantic"
@@ -233,6 +254,8 @@ async def neural_query(params: QueryInput) -> str:
             nodes = storage.search_nodes(params.query, limit=params.limit)
             if params.language and nodes:
                 nodes = [n for n in nodes if n.language == params.language]
+            if not params.include_archived and nodes:
+                nodes = [n for n in nodes if not n.archived]
             if not nodes:
                 hint = (
                     " Run `/neural-index` to build the index."
@@ -805,6 +828,80 @@ async def neural_add_task(params: AddTaskInput) -> str:
         f"**Edges created**: {edges_created}\n\n"
         f"Use `neural_query` to find this task or `neural_inspect` with ID `{task_id}`."
     )
+
+
+# ── Context Tool ──
+
+@mcp.tool(
+    name="neural_context",
+    annotations={
+        "title": "Neural Memory — Compact Context",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_context(params: ContextInput) -> str:
+    """Get a token-budgeted context snapshot for the current project.
+
+    Returns a compact summary (~300–500 tokens) covering:
+    - Index health and staleness status
+    - Project overview (what this codebase does)
+    - Active bugs (non-archived, open)
+    - Active tasks (non-archived, pending/in_progress)
+    - Nodes semantically relevant to your query (if query_hint provided)
+
+    Designed for quick orientation at the start of a task or between steps.
+    Use neural_query / neural_inspect for deeper exploration.
+    """
+    from .context import build_context
+    return build_context(
+        project_root=params.project_root,
+        query_hint=params.query_hint,
+        token_budget=params.token_budget,
+    )
+
+
+# ── Archive Tool ──
+
+@mcp.tool(
+    name="neural_archive",
+    annotations={
+        "title": "Neural Memory — Archive Node",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_archive(params: ArchiveInput) -> str:
+    """Archive or unarchive a bug/task node.
+
+    Archived nodes are excluded from neural_context and neural_query by default.
+    Their importance score is decayed by 0.3× so they sink in semantic search.
+    They remain fully accessible via neural_query with include_archived=true.
+
+    Use this to:
+    - Mark a bug as resolved: archive after setting bug_status='fixed'
+    - Mark a task as done: archive after setting task_status='done'
+    - Restore an archived item: unarchive to bring it back to active
+    """
+    from .storage import Storage
+
+    with Storage(params.project_root) as storage:
+        if params.action == "archive":
+            success = storage.archive_node(params.node_id)
+            if success:
+                return f"Node `{params.node_id}` archived. It will no longer appear in active context fetches."
+            return f"Node `{params.node_id}` not found."
+        elif params.action == "unarchive":
+            success = storage.unarchive_node(params.node_id)
+            if success:
+                return f"Node `{params.node_id}` unarchived. It will appear in active context fetches again."
+            return f"Node `{params.node_id}` not found."
+        else:
+            return "Invalid action. Use: 'archive' or 'unarchive'"
 
 
 # ── DB Schema Tool ──

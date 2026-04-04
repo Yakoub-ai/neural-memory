@@ -1,6 +1,6 @@
 [project]
 name = "neural-memory-mcp"
-version = "0.6.6"
+version = "0.6.7"
 description = "A neural knowledge graph for codebases — three-layer code/bugs/tasks understanding for Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -71,6 +71,8 @@ Issues = "https://github.com/Yakoub-ai/neural-memory/issues"
 neural-memory = "neural_memory.server:mcp.run"
 neural-memory-setup = "neural_memory.cli:main"
 neural-memory-viz = "neural_memory.serve:main"
+neural-context-hook = "neural_memory.hooks:prompt_context"
+neural-session-hook = "neural_memory.hooks:session_end"
 
 [tool.setuptools.packages.find]
 where = ["."]

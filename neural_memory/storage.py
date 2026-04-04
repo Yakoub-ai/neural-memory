@@ -136,6 +136,18 @@ class Storage:
             self.conn.commit()
         except Exception:
             pass
+        # v4→v5: add archived column to nodes table
+        try:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN archived INTEGER DEFAULT 0")
+            self.conn.commit()
+        except Exception:
+            pass
+        try:
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_archived ON nodes(archived)")
+            self.conn.commit()
+        except Exception:
+            pass
+
         # v3→v4: add package_docs table
         try:
             self.conn.executescript("""
@@ -161,17 +173,18 @@ class Storage:
     def upsert_node(self, node: NeuralNode) -> None:
         self.conn.execute(
             """INSERT INTO nodes (id, name, node_type, file_path, line_start, line_end,
-                                  content_hash, importance, category, data)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  content_hash, importance, category, archived, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    name=excluded.name, node_type=excluded.node_type,
                    file_path=excluded.file_path, line_start=excluded.line_start,
                    line_end=excluded.line_end, content_hash=excluded.content_hash,
                    importance=excluded.importance, category=excluded.category,
-                   data=excluded.data""",
+                   archived=excluded.archived, data=excluded.data""",
             (node.id, node.name, node.node_type.value, node.file_path,
              node.line_start, node.line_end, node.content_hash,
-             node.importance, node.category, json.dumps(node.to_dict()))
+             node.importance, node.category, 1 if node.archived else 0,
+             json.dumps(node.to_dict()))
         )
         # Always auto-commits. For bulk writes use batch_upsert_nodes() instead.
         self.conn.commit()
@@ -196,6 +209,66 @@ class Storage:
             "SELECT data FROM nodes WHERE category = ?", (category,)
         ).fetchall()
         return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
+
+    def get_active_items(self, category: str) -> list[NeuralNode]:
+        """Return non-archived nodes for a category (bugs or tasks), ordered by importance."""
+        rows = self.conn.execute(
+            "SELECT data FROM nodes WHERE category = ? AND (archived IS NULL OR archived = 0) ORDER BY importance DESC",
+            (category,)
+        ).fetchall()
+        return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
+
+    def archive_node(self, node_id: str) -> bool:
+        """Mark a single node as archived and decay its importance by 0.3×."""
+        node = self.get_node(node_id)
+        if not node:
+            return False
+        node.archived = True
+        node.importance = round(node.importance * 0.3, 3)
+        self.conn.execute(
+            "UPDATE nodes SET archived = 1, importance = ?, data = ? WHERE id = ?",
+            (node.importance, json.dumps(node.to_dict()), node_id)
+        )
+        self.conn.commit()
+        return True
+
+    def unarchive_node(self, node_id: str) -> bool:
+        """Unarchive a node (restore to active state — importance is NOT restored)."""
+        node = self.get_node(node_id)
+        if not node:
+            return False
+        node.archived = False
+        self.conn.execute(
+            "UPDATE nodes SET archived = 0, data = ? WHERE id = ?",
+            (json.dumps(node.to_dict()), node_id)
+        )
+        self.conn.commit()
+        return True
+
+    def archive_completed(self) -> int:
+        """Bulk-archive all done tasks and fixed bugs. Returns count archived."""
+        rows = self.conn.execute(
+            """SELECT data FROM nodes
+               WHERE (archived IS NULL OR archived = 0)
+               AND category IN ('bugs', 'tasks')
+               AND (
+                   (category = 'bugs' AND json_extract(data, '$.bug_status') = 'fixed')
+                   OR (category = 'tasks' AND json_extract(data, '$.task_status') = 'done')
+               )"""
+        ).fetchall()
+        count = 0
+        for row in rows:
+            node = NeuralNode.from_dict(json.loads(row["data"]))
+            node.archived = True
+            node.importance = round(node.importance * 0.3, 3)
+            self.conn.execute(
+                "UPDATE nodes SET archived = 1, importance = ?, data = ? WHERE id = ?",
+                (node.importance, json.dumps(node.to_dict()), node.id)
+            )
+            count += 1
+        if count:
+            self.conn.commit()
+        return count
 
     def get_nodes_by_type(self, node_type: NodeType) -> list[NeuralNode]:
         rows = self.conn.execute(
@@ -451,17 +524,18 @@ class Storage:
         with self.transaction():
             self.conn.executemany(
                 """INSERT INTO nodes (id, name, node_type, file_path, line_start, line_end,
-                                      content_hash, importance, category, data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      content_hash, importance, category, archived, data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        name=excluded.name, node_type=excluded.node_type,
                        file_path=excluded.file_path, line_start=excluded.line_start,
                        line_end=excluded.line_end, content_hash=excluded.content_hash,
                        importance=excluded.importance, category=excluded.category,
-                       data=excluded.data""",
+                       archived=excluded.archived, data=excluded.data""",
                 [(n.id, n.name, n.node_type.value, n.file_path,
                   n.line_start, n.line_end, n.content_hash,
-                  n.importance, n.category, json.dumps(n.to_dict()))
+                  n.importance, n.category, 1 if n.archived else 0,
+                  json.dumps(n.to_dict()))
                  for n in nodes]
             )
 

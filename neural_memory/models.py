@@ -109,6 +109,10 @@ class NeuralNode:
     # ── Layer / category ──────────────────────────────────────────────────────
     # "codebase" | "bugs" | "tasks"  — used for visualization filtering
     category: str = "codebase"
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    # Archived = completed task (done) or fixed bug. Still queryable, but excluded
+    # from active context fetches and decayed in importance (×0.3).
+    archived: bool = False
     # ── Bug-specific fields ───────────────────────────────────────────────────
     severity: str = ""              # low / medium / high / critical
     bug_status: str = ""            # open / fixed

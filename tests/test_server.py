@@ -4,20 +4,25 @@ import json
 import pytest
 import pytest_asyncio
 
-from neural_memory.models import IndexMode
+from neural_memory.models import IndexMode, NodeType
 from neural_memory.config import NeuralConfig, save_config
 from neural_memory.indexer import full_index
+from neural_memory.storage import Storage
 from neural_memory.server import (
     neural_index,
     neural_query,
     neural_inspect,
     neural_status,
     neural_config,
+    neural_context,
+    neural_archive,
     IndexInput,
     QueryInput,
     InspectInput,
     StatusInput,
     ConfigInput,
+    ContextInput,
+    ArchiveInput,
 )
 
 
@@ -176,3 +181,123 @@ async def test_neural_config_add_exclude(tmp_path):
         value="**/generated/**",
     ))
     assert "generated" in result
+
+
+# ── neural_context ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_neural_context_returns_snapshot(indexed_project):
+    result = await neural_context(ContextInput(project_root=str(indexed_project)))
+    assert "<!-- neural-memory context -->" in result
+    assert "<!-- /neural-memory -->" in result
+
+
+@pytest.mark.asyncio
+async def test_neural_context_with_query_hint(indexed_project):
+    result = await neural_context(ContextInput(
+        project_root=str(indexed_project),
+        query_hint="greet",
+    ))
+    assert "<!-- neural-memory context -->" in result
+
+
+@pytest.mark.asyncio
+async def test_neural_context_uninitialized(tmp_path):
+    result = await neural_context(ContextInput(project_root=str(tmp_path)))
+    # Should still return wrapped content (uninitialized status), not crash
+    assert "neural-memory" in result.lower()
+
+
+# ── neural_archive ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_neural_archive_and_unarchive(indexed_project):
+    # Get a known node ID first
+    query_result = await neural_query(QueryInput(
+        query="greet",
+        project_root=str(indexed_project),
+    ))
+    import re
+    m = re.search(r"ID: `([a-f0-9]+)`", query_result)
+    assert m, f"Could not find node ID in: {query_result}"
+    node_id = m.group(1)
+
+    # Archive it
+    result = await neural_archive(ArchiveInput(
+        node_id=node_id,
+        action="archive",
+        project_root=str(indexed_project),
+    ))
+    assert "archived" in result.lower()
+
+    # Unarchive it
+    result2 = await neural_archive(ArchiveInput(
+        node_id=node_id,
+        action="unarchive",
+        project_root=str(indexed_project),
+    ))
+    assert "unarchived" in result2.lower()
+
+
+@pytest.mark.asyncio
+async def test_neural_archive_missing_node(indexed_project):
+    result = await neural_archive(ArchiveInput(
+        node_id="nonexistent_node_id_xyz",
+        action="archive",
+        project_root=str(indexed_project),
+    ))
+    assert "not found" in result.lower()
+
+
+# ── neural_query include_archived ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_neural_query_excludes_archived_by_default(indexed_project):
+    # Archive a node then verify it doesn't appear in default query
+    query_result = await neural_query(QueryInput(
+        query="greet",
+        project_root=str(indexed_project),
+    ))
+    import re
+    m = re.search(r"ID: `([a-f0-9]+)`", query_result)
+    assert m
+    node_id = m.group(1)
+
+    await neural_archive(ArchiveInput(
+        node_id=node_id,
+        action="archive",
+        project_root=str(indexed_project),
+    ))
+
+    # Default query should not return the archived node
+    result = await neural_query(QueryInput(
+        query="greet",
+        project_root=str(indexed_project),
+    ))
+    assert node_id not in result
+
+
+@pytest.mark.asyncio
+async def test_neural_query_includes_archived_when_requested(indexed_project):
+    # Archive a node, then query with include_archived=True
+    query_result = await neural_query(QueryInput(
+        query="greet",
+        project_root=str(indexed_project),
+    ))
+    import re
+    m = re.search(r"ID: `([a-f0-9]+)`", query_result)
+    assert m
+    node_id = m.group(1)
+
+    await neural_archive(ArchiveInput(
+        node_id=node_id,
+        action="archive",
+        project_root=str(indexed_project),
+    ))
+
+    result = await neural_query(QueryInput(
+        query="greet",
+        project_root=str(indexed_project),
+        include_archived=True,
+    ))
+    assert node_id in result

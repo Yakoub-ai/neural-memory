@@ -418,3 +418,91 @@ def test_upsert_package_doc_updates_existing(storage):
     all_docs = storage.get_all_package_docs()
     pypi_docs = [d for d in all_docs if d["package_name"] == "mypkg"]
     assert len(pypi_docs) == 1
+
+
+# ── Archive / lifecycle ────────────────────────────────────────────────────────
+
+def _bug_node(id="b1", bug_status="open", importance=1.0) -> NeuralNode:
+    from neural_memory.models import NodeType
+    return NeuralNode(
+        id=id, name=f"bug_{id}", node_type=NodeType.BUG,
+        file_path="src/foo.py", line_start=1, line_end=5,
+        category="bugs", bug_status=bug_status, importance=importance,
+    )
+
+
+def _task_node(id="t1", task_status="pending", importance=0.8) -> NeuralNode:
+    from neural_memory.models import NodeType
+    return NeuralNode(
+        id=id, name=f"task_{id}", node_type=NodeType.TASK,
+        file_path="src/foo.py", line_start=1, line_end=5,
+        category="tasks", task_status=task_status, importance=importance,
+    )
+
+
+def test_get_active_items_returns_non_archived(storage):
+    storage.upsert_node(_bug_node(id="b1"))
+    results = storage.get_active_items("bugs")
+    assert any(n.id == "b1" for n in results)
+
+
+def test_get_active_items_excludes_archived(storage):
+    n = _bug_node(id="b2")
+    n.archived = True
+    storage.upsert_node(n)
+    results = storage.get_active_items("bugs")
+    assert not any(n.id == "b2" for n in results)
+
+
+def test_archive_node_sets_archived_and_decays_importance(storage):
+    storage.upsert_node(_bug_node(id="b3", importance=1.0))
+    success = storage.archive_node("b3")
+    assert success is True
+    node = storage.get_node("b3")
+    assert node.archived is True
+    assert abs(node.importance - 0.3) < 0.001
+
+
+def test_archive_node_returns_false_for_missing(storage):
+    assert storage.archive_node("nonexistent_id") is False
+
+
+def test_unarchive_node_clears_archived(storage):
+    storage.upsert_node(_bug_node(id="b4", importance=1.0))
+    storage.archive_node("b4")
+    success = storage.unarchive_node("b4")
+    assert success is True
+    node = storage.get_node("b4")
+    assert node.archived is False
+    # Importance stays decayed — by design
+    assert node.importance < 1.0
+
+
+def test_archive_completed_archives_done_tasks(storage):
+    storage.upsert_node(_task_node(id="t1", task_status="done"))
+    count = storage.archive_completed()
+    assert count == 1
+    node = storage.get_node("t1")
+    assert node.archived is True
+
+
+def test_archive_completed_archives_fixed_bugs(storage):
+    storage.upsert_node(_bug_node(id="b5", bug_status="fixed"))
+    count = storage.archive_completed()
+    assert count == 1
+    node = storage.get_node("b5")
+    assert node.archived is True
+
+
+def test_archive_completed_skips_active_items(storage):
+    storage.upsert_node(_bug_node(id="b6", bug_status="open"))
+    storage.upsert_node(_task_node(id="t2", task_status="in_progress"))
+    count = storage.archive_completed()
+    assert count == 0
+
+
+def test_schema_migration_adds_archived_column(tmp_path):
+    with Storage(str(tmp_path)) as s:
+        cols = s.conn.execute("PRAGMA table_info(nodes)").fetchall()
+        col_names = [c["name"] for c in cols]
+    assert "archived" in col_names
