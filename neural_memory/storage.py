@@ -173,8 +173,7 @@ class Storage:
              node.line_start, node.line_end, node.content_hash,
              node.importance, node.category, json.dumps(node.to_dict()))
         )
-        # Note: caller is responsible for committing when batching.
-        # A bare upsert_node auto-commits so single-call sites stay correct.
+        # Always auto-commits. For bulk writes use batch_upsert_nodes() instead.
         self.conn.commit()
 
 

@@ -8,6 +8,7 @@ Updates:
     - pyproject.toml
     - neural_memory/__init__.py
     - .claude-plugin/plugin.json
+    - .claude-plugin/marketplace.json
 """
 
 import json
@@ -57,6 +58,15 @@ def bump_plugin_json(version: str) -> str:
     return str(path.relative_to(ROOT))
 
 
+def bump_marketplace_json(version: str) -> str:
+    path = ROOT / ".claude-plugin" / "marketplace.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for plugin in data.get("plugins", []):
+        plugin["version"] = version
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return str(path.relative_to(ROOT))
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <version>", file=sys.stderr)
@@ -76,6 +86,7 @@ def main() -> None:
         updated.append(bump_pyproject(version))
         updated.append(bump_init(version))
         updated.append(bump_plugin_json(version))
+        updated.append(bump_marketplace_json(version))
     except (ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

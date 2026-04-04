@@ -8,7 +8,7 @@ description: Build the complete neural memory knowledge graph for this codebase 
 Build the complete neural memory knowledge graph for this codebase.
 
 ## What this does
-1. Discovers all Python files (respecting exclude patterns)
+1. Discovers source files across supported languages (respecting exclude patterns)
 2. Parses AST to extract functions, classes, methods, modules
 3. Builds a directed graph of call relationships, imports, and inheritance
 4. Redacts sensitive content (secrets, API keys, connection strings)

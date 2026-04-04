@@ -35,6 +35,7 @@ asyncio.run(neural_query(QueryInput(query="your search term")))
 | `query` | str | required | Function name, class name, or concept keyword |
 | `project_root` | str | `"."` | Project root directory |
 | `limit` | int | `10` | Max results (1–50) |
+| `language` | str | `null` | Filter results to a specific language (e.g. 'python', 'typescript', 'rust') |
 
 Results are ranked by importance score — the most connected, public-facing code appears first.
 

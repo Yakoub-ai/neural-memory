@@ -12,7 +12,7 @@ Neural Memory is a knowledge graph that maps your codebase into layered, navigab
 
 ## How It Works
 
-The plugin parses your Python codebase into a three-layer directed graph:
+The plugin parses your codebase into a three-layer directed graph:
 
 **Codebase layer** — AST-parsed nodes, LSP-enriched:
 - Nodes: modules, classes, functions, methods, project/directory overviews
@@ -26,7 +26,7 @@ The plugin parses your Python codebase into a three-layer directed graph:
 - Nodes: phases, tasks with status and priority
 - Edges: `PHASE_CONTAINS` task, `RELATES_TO` code nodes
 
-**Embeddings**: 128-dim composite (100-dim TF-IDF+SVD content + 28-dim structural graph features)
+**Embeddings**: 138-dim composite (100-dim TF-IDF+SVD content + 38-dim structural graph features)
 **Search**: three-phase branch search — seed by cosine similarity → graph expansion → weighted rank
 **Security**: Secrets, API keys, and sensitive values are automatically redacted
 **LSP**: Pyright/pylsp enrichment for high-importance nodes (type signatures, diagnostics)
@@ -65,3 +65,7 @@ If the index is stale or uninitialized, inform the user and suggest the appropri
 | — | `neural_visualize_dashboard` | Interactive D3 dashboard (3 views, filters) |
 | — | `neural_add_bug` | Manually add a bug node |
 | — | `neural_add_task` | Manually add a task node |
+| `/neural-visualize` | `neural_serve` | Start interactive dashboard server |
+| `/neural-stop` | `neural_stop_serve` | Stop dashboard server |
+| — | `neural_index_db` | Index live database schema |
+| — | `neural_fetch_docs` | Fetch external package documentation |

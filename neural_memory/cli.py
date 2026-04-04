@@ -37,8 +37,8 @@ def _check_deps() -> list[str]:
     problems = []
 
     # Python version
-    if sys.version_info < (3, 10):
-        problems.append(f"Python 3.10+ required (found {platform.python_version()})")
+    if sys.version_info < (3, 12):
+        problems.append(f"Python 3.12+ required (found {platform.python_version()})")
 
     # sqlite3 (stdlib, but some minimal installs strip it)
     try:
@@ -130,10 +130,10 @@ def cmd_doctor() -> None:
 
     # Python
     v = platform.python_version()
-    if sys.version_info >= (3, 10):
+    if sys.version_info >= (3, 12):
         print(f"  [OK] Python {v}")
     else:
-        print(f"  [!!] Python {v} (need 3.10+)")
+        print(f"  [!!] Python {v} (need 3.12+)")
         ok = False
 
     # sqlite3
