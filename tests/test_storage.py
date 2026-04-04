@@ -177,6 +177,32 @@ def test_delete_edges_by_file(storage):
     assert storage.get_edges_from("n1") == []
 
 
+def test_get_all_edges_by_node_structure(storage):
+    # Create two nodes and one directed edge
+    storage.upsert_node(_node(id="n1", name="caller"))
+    storage.upsert_node(_node(id="n2", name="callee"))
+    storage.upsert_edge(_edge("n1", "n2", EdgeType.CALLS))
+
+    result = storage.get_all_edges_by_node()
+
+    # Both endpoints must appear with the correct incoming/outgoing buckets
+    assert "n1" in result
+    assert "n2" in result
+    assert len(result["n1"]["outgoing"]) == 1
+    assert result["n1"]["outgoing"][0].target_id == "n2"
+    assert result["n1"]["incoming"] == []
+    assert len(result["n2"]["incoming"]) == 1
+    assert result["n2"]["incoming"][0].source_id == "n1"
+    assert result["n2"]["outgoing"] == []
+
+
+def test_get_all_edges_by_node_isolated_node_absent(storage):
+    # A node with no edges should not appear in the result at all
+    storage.upsert_node(_node(id="lone", name="isolated"))
+    result = storage.get_all_edges_by_node()
+    assert "lone" not in result
+
+
 # ── Index state ────────────────────────────────────────────────────────────────
 
 def test_get_index_state_returns_default(storage):

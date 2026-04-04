@@ -366,6 +366,9 @@ def update_embeddings(storage: "Storage", changed_node_ids: set[str]) -> int:
     svd_components = np.array(meta.svd_components, dtype=np.float32)  # [k, V]
     k = min(_SVD_COMPONENTS, svd_components.shape[0])
 
+    # Pre-fetch all edges once to avoid N+1 queries in _structural_features
+    edges_by_node = storage.get_all_edges_by_node()
+
     count = 0
     for node_id in changed_node_ids:
         node = storage.get_node(node_id)
@@ -389,7 +392,7 @@ def update_embeddings(storage: "Storage", changed_node_ids: set[str]) -> int:
         content_padded = np.zeros(_SVD_COMPONENTS, dtype=np.float32)
         content_padded[:k] = content_reduced
 
-        struct_vec = np.array(_structural_features(node, storage), dtype=np.float32)
+        struct_vec = np.array(_structural_features(node, storage, edges_by_node=edges_by_node), dtype=np.float32)
 
         combined = np.concatenate([content_padded, struct_vec])
         norm = np.linalg.norm(combined)

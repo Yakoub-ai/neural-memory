@@ -209,6 +209,28 @@ class TestStructuralFeatures(object):
         # in_degree is at index len(_NODE_TYPES), right after the one-hot block
         assert feats[len(_NODE_TYPES)] > 0
 
+    def test_bulk_path_matches_per_node_path(self, storage):
+        """Bulk edges_by_node path must produce the same result as per-node queries."""
+        caller = _node("bulk_caller", file_path="a.py")
+        callee = _node("bulk_callee", file_path="b.py")
+        storage.upsert_node(caller)
+        storage.upsert_node(callee)
+        edge = NeuralEdge(
+            source_id=caller.id,
+            target_id=callee.id,
+            edge_type=EdgeType.CALLS,
+        )
+        storage.upsert_edge(edge)
+
+        edges_by_node = storage.get_all_edges_by_node()
+
+        for node in (caller, callee):
+            feats_bulk = _structural_features(node, storage, edges_by_node=edges_by_node)
+            feats_per_node = _structural_features(node, storage)
+            assert feats_bulk == pytest.approx(feats_per_node), (
+                f"Bulk and per-node paths diverge for node {node.name}"
+            )
+
 
 # ── Pack / unpack tests ────────────────────────────────────────────────────────
 
