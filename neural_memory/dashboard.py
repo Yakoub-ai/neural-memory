@@ -4,7 +4,7 @@ Generates a single self-contained HTML file with:
 - Sidebar: category/type/importance/status/search filters
 - Tab 1: Hierarchy treemap (ECharts treemap)
 - Tab 2: Vector space scatter (PCA-projected, ECharts scatter)
-- Tab 3: Force-directed graph (ECharts graph/force)
+- Tab 3: Hierarchical tree graph (ECharts graph, Reingold-Tilford layout)
 - Click-to-inspect detail panel
 """
 
@@ -76,117 +76,6 @@ def _pca_positions(nodes: list[dict]) -> dict[str, list[float]]:
     return result
 
 
-def _graph_layout(nodes: list[dict], edges: list[dict]) -> dict[str, list[float]]:
-    """Fruchterman-Reingold layout — numpy fast path, pure-Python fallback.
-
-    Returns {node_id: [x, y]} scaled to fit node count without overlap.
-    """
-    if not nodes:
-        return {}
-
-    ids = [n["id"] for n in nodes]
-    id_idx = {nid: i for i, nid in enumerate(ids)}
-    n = len(ids)
-
-    # Canvas scales so a sqrt(n)×sqrt(n) grid of nodes fits with comfortable gaps.
-    # We need area ∝ n (linear), so area_scale ∝ sqrt(n).
-    # sqrt(n/4) gives ~2× more space per node than sqrt(n/15).
-    area_scale = max(1.0, math.sqrt(n / 4.0))
-    W, H = 1000.0 * area_scale, 800.0 * area_scale
-
-    # Seed from PCA so semantically similar nodes start close
-    pca = _pca_positions(nodes)
-
-    try:
-        import numpy as np
-
-        pos = np.array(
-            [[pca.get(nid, [0.0, 0.0])[0] * W * 0.38,
-              pca.get(nid, [0.0, 0.0])[1] * H * 0.38] for nid in ids],
-            dtype=np.float64,
-        )
-
-        # Build edge index (undirected)
-        ep = []
-        for e in edges:
-            s, t = e.get("source_id"), e.get("target_id")
-            if s in id_idx and t in id_idx and s != t:
-                ep.append((id_idx[s], id_idx[t]))
-        ep_arr = np.array(ep, dtype=np.int32) if ep else np.empty((0, 2), dtype=np.int32)
-
-        # k: ideal FR inter-node distance. Increased multiplier (2.0) and floor (400)
-        # so nodes spread aggressively during FR before overlap removal takes over.
-        k = max(math.sqrt(W * H / max(n, 1)) * 2.0, 400.0)
-        temp = W / 4.0
-        cooling = temp / 61.0
-
-        for _ in range(60):
-            delta = pos[:, np.newaxis] - pos[np.newaxis, :]  # (n,n,2)
-            dist = np.linalg.norm(delta, axis=2)             # (n,n)
-            dist = np.where(dist < 0.5, 0.5, dist)
-            np.fill_diagonal(dist, 1.0)
-
-            rep = (k * k / dist)[:, :, np.newaxis] * delta / dist[:, :, np.newaxis]
-            disp = rep.sum(axis=1)
-
-            if len(ep_arr):
-                i_idx, j_idx = ep_arr[:, 0], ep_arr[:, 1]
-                dv = pos[i_idx] - pos[j_idx]
-                d = np.linalg.norm(dv, axis=1, keepdims=True).clip(min=1.0)
-                attr = dv / d * (d ** 2 / k)
-                np.add.at(disp, i_idx, -attr)
-                np.add.at(disp, j_idx,  attr)
-
-            dlen = np.linalg.norm(disp, axis=1, keepdims=True).clip(min=1.0)
-            pos += disp / dlen * np.minimum(dlen, temp)
-            # Clip to ±W (was ±W/2) so FR itself can spread nodes across the full canvas
-            pos[:, 0] = pos[:, 0].clip(-W, W)
-            pos[:, 1] = pos[:, 1].clip(-H, H)
-            temp = max(temp - cooling, 0.5)
-
-        # Overlap removal: push apart nodes whose bounding boxes collide.
-        #
-        # min_sep is sized so a sqrt(n)×sqrt(n) grid fits in [-4W, 4W]:
-        #   grid_width = (sqrt(n)-1) * min_sep ≤ 8*W
-        #   → min_sep = 8*W / (sqrt(n)-1) ≈ 6*W / sqrt(n)  [for n≥4]
-        #
-        # This guarantees: after overlap removal, ECharts auto-fit maps nodes to
-        # ≥2× their rendered pixel width apart at any node count.
-        sqn = max(math.sqrt(n), 2.0)
-        min_sep_x = max(200.0, 6.0 * W / sqn)
-        min_sep_y = max(100.0, 6.0 * H / sqn)
-
-        # Lower push factor (0.35 vs 0.5) and many more iterations to avoid
-        # oscillation on dense graphs; break early when fully resolved.
-        for _ in range(150):
-            dx = pos[:, np.newaxis, 0] - pos[np.newaxis, :, 0]   # (n,n)
-            dy = pos[:, np.newaxis, 1] - pos[np.newaxis, :, 1]
-            ovlp_x = min_sep_x - np.abs(dx)
-            ovlp_y = min_sep_y - np.abs(dy)
-            mask = (ovlp_x > 0) & (ovlp_y > 0)
-            np.fill_diagonal(mask, False)
-            if not mask.any():
-                break
-            sx = np.where(dx >= 0, 1.0, -1.0)
-            sy = np.where(dy >= 0, 1.0, -1.0)
-            push_x = (mask * ovlp_x * sx * 0.35).sum(axis=1)
-            push_y = (mask * ovlp_y * sy * 0.35).sum(axis=1)
-            pos[:, 0] = (pos[:, 0] + push_x).clip(-W * 4.0, W * 4.0)
-            pos[:, 1] = (pos[:, 1] + push_y).clip(-H * 4.0, H * 4.0)
-
-        return {ids[i]: [round(float(pos[i, 0]), 1), round(float(pos[i, 1]), 1)]
-                for i in range(n)}
-
-    except Exception:
-        pass
-
-    # Pure-Python fallback: scale PCA positions proportionally
-    fallback_scale = 460.0 * area_scale
-    return {nid: [round(pca.get(nid, [0.0, 0.0])[0] * fallback_scale, 1),
-                  round(pca.get(nid, [0.0, 0.0])[1] * fallback_scale * 0.78, 1)]
-            for nid in ids}
-
-
 def _build_hierarchy(nodes: list[dict], edges: list[dict]) -> dict:
     """Build a tree dict for ECharts treemap from CONTAINS/PHASE_CONTAINS edges."""
     contains_types = {"contains", "phase_contains", "task_contains"}
@@ -234,6 +123,165 @@ def _build_hierarchy(nodes: list[dict], edges: list[dict]) -> dict:
     }
 
 
+def _build_virtual_tree(nodes: list[dict], edges: list[dict], max_depth: int = 6) -> dict:
+    """Build a virtual hierarchy tree for the interactive Graph tab.
+
+    Each real node's children are grouped by relationship type into virtual
+    intermediate nodes (e.g. [calls], [imports], [called by]).  This turns the
+    multi-edge knowledge graph into an infinitely navigable collapsible tree.
+
+    Virtual group nodes carry ``_virtual: true`` so the JS can style them
+    differently.  Real leaf nodes beyond max_depth carry ``_hasMore: true`` so
+    the JS can expand them on-demand from RAW.edges without a server round-trip.
+    """
+    # ── Build adjacency indices ───────────────────────────────────────────────
+    contains_types = {"contains", "phase_contains", "task_contains"}
+    outgoing: dict[str, dict[str, list[str]]] = {}  # {node_id: {edge_type: [target_ids]}}
+    incoming: dict[str, dict[str, list[str]]] = {}  # {node_id: {edge_type: [source_ids]}}
+    child_set: set[str] = set()
+
+    for e in edges:
+        src = e.get("source_id", "")
+        tgt = e.get("target_id", "")
+        etype = e.get("edge_type", "")
+        if not src or not tgt or not etype:
+            continue
+        outgoing.setdefault(src, {}).setdefault(etype, []).append(tgt)
+        incoming.setdefault(tgt, {}).setdefault(etype, []).append(src)
+        if etype in contains_types:
+            child_set.add(tgt)
+
+    node_by_id = {n["id"]: n for n in nodes}
+
+    # Groups to show and their display labels — order matters (containment first)
+    # Each entry: (edge_type, direction, label)
+    GROUP_ORDER = [
+        ("contains",       "out", "contains"),
+        ("phase_contains", "out", "contains"),
+        ("task_contains",  "out", "contains"),
+        ("calls",          "out", "calls"),
+        ("calls",          "in",  "called by"),
+        ("imports",        "out", "imports"),
+        ("imports",        "in",  "imported by"),
+        ("inherits",       "out", "inherits"),
+        ("inherits",       "in",  "inherited by"),
+        ("implements",     "out", "implements"),
+        ("implements",     "in",  "implemented by"),
+        ("uses",           "out", "uses"),
+        ("uses",           "in",  "used by"),
+        ("defines",        "out", "defines"),
+        ("defines",        "in",  "defined by"),
+        ("relates_to",     "out", "relates to"),
+        ("relates_to",     "in",  "related from"),
+        ("fixed_by",       "out", "fixed by"),
+        ("fixed_by",       "in",  "fixes"),
+        ("references",     "out", "references"),
+        ("references",     "in",  "referenced by"),
+        ("queries",        "out", "queries"),
+        ("queries",        "in",  "queried by"),
+        ("writes_to",      "out", "writes to"),
+        ("writes_to",      "in",  "written by"),
+    ]
+    MAX_PER_GROUP = 20  # cap children per group; JS shows "+N more" for the rest
+
+    def _make_node_entry(nid: str) -> dict:
+        n = node_by_id.get(nid, {})
+        return {
+            "id": nid,
+            "name": n.get("name", nid),
+            "node_type": n.get("node_type", "other"),
+            "language": n.get("language", ""),
+            "importance": n.get("importance", 0.0),
+            "_real": True,
+        }
+
+    def _build_node(nid: str, visited: frozenset, depth: int) -> dict:
+        entry = _make_node_entry(nid)
+        n = node_by_id.get(nid, {})
+        # Always attach short summary so detail panel can render from virtual tree nodes
+        entry["summary_short"] = n.get("summary_short", "")
+        entry["file_path"] = n.get("file_path", "")
+
+        if depth >= max_depth:
+            # Check if this node has any relationships beyond what's visible
+            has_out = any(outgoing.get(nid, {}).get(et) for et, _, _ in GROUP_ORDER)
+            has_in = any(incoming.get(nid, {}).get(et) for _, d, _ in GROUP_ORDER if d == "in"
+                         for et in [next((g[0] for g in GROUP_ORDER if g[1] == "in" and g[2] == _), None)])
+            if outgoing.get(nid) or incoming.get(nid):
+                entry["_hasMore"] = True
+            return entry
+
+        visited_next = visited | {nid}
+        children: list[dict] = []
+
+        for etype, direction, label in GROUP_ORDER:
+            if direction == "out":
+                targets = outgoing.get(nid, {}).get(etype, [])
+            else:
+                targets = incoming.get(nid, {}).get(etype, [])
+
+            # Remove already-visited nodes to prevent cycle rendering
+            targets = [t for t in targets if t not in visited_next and t in node_by_id]
+            if not targets:
+                continue
+
+            # Sort by importance descending so top nodes appear first
+            targets.sort(key=lambda t: node_by_id.get(t, {}).get("importance", 0.0), reverse=True)
+            truncated = max(0, len(targets) - MAX_PER_GROUP)
+            targets = targets[:MAX_PER_GROUP]
+
+            group_children = [_build_node(t, visited_next, depth + 2) for t in targets]
+            if truncated:
+                group_children.append({
+                    "name": f"… +{truncated} more",
+                    "_truncated": True,
+                    "_parentId": nid,
+                    "_edgeType": etype,
+                    "_direction": direction,
+                })
+
+            children.append({
+                "name": f"[{label}]",
+                "_virtual": True,
+                "_edgeType": etype,
+                "_direction": direction,
+                "children": group_children,
+            })
+
+        if children:
+            entry["children"] = children
+        elif outgoing.get(nid) or incoming.get(nid):
+            entry["_hasMore"] = True
+
+        return entry
+
+    # ── Find containment roots (nodes with no contains-type parent) ───────────
+    roots = [n for n in nodes if n["id"] not in child_set]
+    if not roots:
+        roots = nodes[:1]
+
+    if len(roots) == 1:
+        return _build_node(roots[0]["id"], frozenset(), 0)
+
+    # Multiple roots → synthetic project root
+    root_children = [_build_node(r["id"], frozenset(), 2) for r in roots]
+    return {
+        "id": "__root__",
+        "name": "Project",
+        "node_type": "project_overview",
+        "language": "",
+        "importance": 1.0,
+        "_real": True,
+        "children": [{
+            "name": "[contains]",
+            "_virtual": True,
+            "_edgeType": "contains",
+            "_direction": "out",
+            "children": root_children,
+        }],
+    }
+
+
 def _extract_data(storage: Storage) -> dict:
     """Extract all nodes, edges, hierarchy, and PCA positions as JSON-serialisable dict."""
     raw_nodes = storage.get_all_nodes()
@@ -274,18 +322,15 @@ def _extract_data(storage: Storage) -> dict:
         })
 
     pca = _pca_positions(nodes)
-    graph_pos = _graph_layout(nodes, edges)
 
     # Remove embedding from node data (large, not needed in JS)
     for n in nodes:
         n.pop("embedding", None)
         n["px"] = pca.get(n["id"], [0.0, 0.0])[0]
         n["py"] = pca.get(n["id"], [0.0, 0.0])[1]
-        gp = graph_pos.get(n["id"], [0.0, 0.0])
-        n["gx"] = gp[0]
-        n["gy"] = gp[1]
 
     hierarchy = _build_hierarchy(nodes, edges)
+    virtual_tree = _build_virtual_tree(nodes, edges)
 
     stats = storage.get_stats() if hasattr(storage, "get_stats") else {}
 
@@ -293,6 +338,7 @@ def _extract_data(storage: Storage) -> dict:
         "nodes": nodes,
         "edges": edges,
         "hierarchy": hierarchy,
+        "virtual_tree": virtual_tree,
         "stats": stats,
     }
 
@@ -386,12 +432,17 @@ def _html_body() -> str:
     <input type="range" id="depth-slider" min="1" max="6" step="1" value="3">
     <div class="range-labels"><span>1</span><span id="depth-val">3</span><span>6</span></div>
     <div id="graph-controls" style="display:none">
-      <div class="sb-head">Edge Types</div>
+      <div class="sb-head">Layout</div>
+      <select id="graph-layout-select" style="width:100%;background:#161b22;color:#c9d1d9;border:1px solid #30363d;padding:3px 6px;border-radius:4px;font-size:12px">
+        <option value="orthogonal">Orthogonal (L→R)</option>
+        <option value="radial">Radial</option>
+      </select>
+      <div class="sb-head" style="margin-top:8px">Expand Depth</div>
+      <input type="range" id="graph-depth-slider" min="1" max="6" step="1" value="3">
+      <div class="range-labels"><span>1</span><span id="graph-depth-val">3</span><span>6</span></div>
+      <div class="sb-head" style="margin-top:8px">Relationship Types</div>
       <div id="edge-toggles"></div>
-      <div class="sb-head" style="margin-top:10px">Node Spacing</div>
-      <input type="range" id="air-slider" min="0" max="20" step="1" value="2">
-      <div class="range-labels"><span>Tight</span><span>Spread</span></div>
-      <div class="sb-head" style="margin-top:6px">Graph Options</div>
+      <div class="sb-head" style="margin-top:6px">Options</div>
       <div class="filter-row">
         <input type="checkbox" id="label-toggle" checked>
         <label for="label-toggle">Show labels</label>
@@ -462,23 +513,23 @@ function startApp() {
 
   // ── Node / edge style configs ──────────────────────────────────────────────
   var NODE_STYLE = {
-    module:             ['#58a6ff', 112, 42],
-    class:              ['#d2a8ff', 122, 44],
-    function:           ['#79c0ff',  92, 38],
-    method:             ['#79c0ff',  92, 36],
-    project_overview:   ['#f0e68c', 132, 44],
-    directory_overview: ['#8b949e', 112, 40],
-    config:             ['#e3b341',  92, 36],
-    export:             ['#56d364',  92, 34],
-    type_def:           ['#bc8cff',  96, 36],
-    other:              ['#8b949e',  86, 34],
-    bug:                ['#f85149', 106, 40],
-    phase:              ['#3fb950', 122, 44],
-    task:               ['#3fb950', 106, 38],
-    subtask:            ['#56d364',  92, 34],
-    database:           ['#d2a8ff', 132, 46],
-    table:              ['#b28cf5', 112, 40],
-    column:             ['#9c6fe0',  92, 34]
+    module:             ['#58a6ff',  56, 22],
+    class:              ['#d2a8ff',  62, 24],
+    function:           ['#79c0ff',  48, 20],
+    method:             ['#79c0ff',  48, 18],
+    project_overview:   ['#f0e68c',  66, 24],
+    directory_overview: ['#8b949e',  56, 20],
+    config:             ['#e3b341',  48, 18],
+    export:             ['#56d364',  48, 18],
+    type_def:           ['#bc8cff',  50, 18],
+    other:              ['#8b949e',  44, 18],
+    bug:                ['#f85149',  52, 20],
+    phase:              ['#3fb950',  62, 22],
+    task:               ['#3fb950',  52, 20],
+    subtask:            ['#56d364',  46, 18],
+    database:           ['#d2a8ff',  66, 24],
+    table:              ['#b28cf5',  56, 20],
+    column:             ['#9c6fe0',  46, 18]
   };
 
   var EDGE_STYLE = {
@@ -497,8 +548,9 @@ function startApp() {
   var CATEGORY_LIST = Object.keys(NODE_STYLE);
 
   function nodeStyleFor(type) { return NODE_STYLE[type] || ['#8b949e', 96, 36]; }
-  function nodeW(n) { var s = nodeStyleFor(n.node_type); return s[1] + (n.importance || 0) * 20; }
-  function nodeH(n) { var s = nodeStyleFor(n.node_type); return s[2] + (n.importance || 0) * 8; }
+  // Size nodes to fit their label text — ~7px per char at font-size 11, 24px padding
+  function nodeW(n) { return Math.max(52, Math.min(180, (n.name || '').length * 7 + 24)); }
+  function nodeH(n) { return 26; }
   function nodeColor(n) { return nodeStyleFor(n.node_type)[0]; }
   function edgeStyleFor(type) { return EDGE_STYLE[type] || ['#444d56', true, 1.0, true]; }
 
@@ -516,11 +568,9 @@ function startApp() {
     statuses: { open: true, fixed: true, pending: true, in_progress: true, done: true, '': true },
     search: '',
     depth: 3,
+    graphDepth: 3,
     selectedId: null
   };
-
-  var edgeVisible = {};
-  Object.keys(EDGE_STYLE).forEach(function(t) { edgeVisible[t] = true; });
 
   function visibleNodes() {
     var q = state.search.toLowerCase();
@@ -982,226 +1032,313 @@ function startApp() {
     });
   }
 
-  // ── Force-directed graph ───────────────────────────────────────────────────
+  // ── Interactive collapsible tree (Graph tab) ─────────────────────────────
+  // Replaces the old static radial graph with a virtual hierarchy tree.
+  // Each real node's children are grouped by relationship type into virtual
+  // intermediate nodes ([calls], [imports], [inherits], etc.), enabling
+  // infinite drill-down.  Nodes beyond pre-computed depth expand on-demand
+  // in JS using the already-embedded RAW.edges data.
 
-  var _graphNodes = [];  // snapshot for 2-hop focus
-  var _graphZoom = 1;    // cumulative zoom factor for label scaling
+  var _graphLayout = 'orthogonal'; // 'orthogonal' | 'radial'
+  var _graphTreeRoot = null;        // mutable root — updated on JS-side expansion
+  var _expandedIds  = {};           // {nodeId: true} — real nodes explicitly expanded
+  var _graphFirstDraw = true;       // first draw uses replace mode (auto-fit)
 
-  function buildGraphNodes(nodes, zoom, airScale) {
-    zoom = zoom || 1;
-    airScale = airScale || 1;
-    // Scale nodes down for large graphs so they don't overlap after ECharts auto-fit.
-    // ECharts fits the bounding box to viewport, so screen_sep ∝ 1/sqrt(n).
-    // Scaling node size by the same factor keeps separation > node size at any n.
-    var sizeScale = Math.max(0.15, Math.min(1.0, Math.sqrt(30 / Math.max(1, nodes.length))));
-    return nodes.map(function(n) {
-      var color = nodeColor(n);
-      var catIdx = CATEGORY_LIST.indexOf(n.node_type);
-      var w = Math.round(nodeW(n) * sizeScale);
-      var h = Math.round(nodeH(n) * sizeScale);
-      var maxChars = Math.max(3, Math.floor((w - 10) / 10));
-      var label = n.name.length > maxChars ? n.name.slice(0, maxChars - 1) + '\u2026' : n.name;
-      return {
-        id: n.id,
-        name: n.name,
-        x: (n.gx || 0) * airScale,
-        y: (n.gy || 0) * airScale,
-        fixed: true,
-        symbolSize: [w, h],
-        symbol: n.node_type === 'bug' ? 'diamond' : 'roundRect',
-        itemStyle: {
-          color: color + '22',
-          borderColor: color,
-          borderWidth: Math.max(1, (1.5 + (n.importance || 0) * 2) * sizeScale),
-          opacity: 1
-        },
-        emphasis: {
-          itemStyle: { color: color + '55', borderColor: color, borderWidth: 3 },
-          label: { show: true }
-        },
-        label: {
-          show: true,
-          formatter: label,
-          fontSize: Math.min(52, Math.max(10, Math.round(16 * zoom * sizeScale))),
-          color: '#e6edf3',
-          position: 'inside',
-          overflow: 'truncate',
-          width: w - 10
-        },
-        category: catIdx >= 0 ? catIdx : 0,
-        value: n.importance || 0,
-        _id: n.id
-      };
+  // Relationship-type → display label map (mirrors Python GROUP_ORDER)
+  var GROUP_LABELS = {
+    'contains:out':    'contains',
+    'phase_contains:out': 'contains',
+    'task_contains:out':  'contains',
+    'calls:out':       'calls',
+    'calls:in':        'called by',
+    'imports:out':     'imports',
+    'imports:in':      'imported by',
+    'inherits:out':    'inherits',
+    'inherits:in':     'inherited by',
+    'implements:out':  'implements',
+    'implements:in':   'implemented by',
+    'uses:out':        'uses',
+    'uses:in':         'used by',
+    'defines:out':     'defines',
+    'defines:in':      'defined by',
+    'relates_to:out':  'relates to',
+    'relates_to:in':   'related from',
+    'fixed_by:out':    'fixed by',
+    'fixed_by:in':     'fixes',
+    'references:out':  'references',
+    'references:in':   'referenced by',
+    'queries:out':     'queries',
+    'queries:in':      'queried by',
+    'writes_to:out':   'writes to',
+    'writes_to:in':    'written by'
+  };
+
+  // Edge type → visible flag (controls which relationship groups render)
+  var EDGE_DEFAULT_ON = { contains: true, phase_contains: true, task_contains: true,
+                          calls: true, imports: true, inherits: true, implements: true,
+                          uses: true, defines: true };
+  var edgeVisible = {};
+  Object.keys(EDGE_STYLE).forEach(function(t) { edgeVisible[t] = !!(EDGE_DEFAULT_ON[t]); });
+
+  // Lazily-built adjacency index for JS-side expansion
+  var _adjOut = null;  // {nodeId: {edgeType: [targetIds]}}
+  var _adjIn  = null;  // {nodeId: {edgeType: [sourceIds]}}
+
+  function _buildAdj() {
+    if (_adjOut) return;
+    _adjOut = {}; _adjIn = {};
+    RAW.edges.forEach(function(e) {
+      var s = e.source_id, t = e.target_id, et = e.edge_type;
+      if (!s || !t || !et) return;
+      if (!_adjOut[s]) _adjOut[s] = {};
+      if (!_adjOut[s][et]) _adjOut[s][et] = [];
+      _adjOut[s][et].push(t);
+      if (!_adjIn[t]) _adjIn[t] = {};
+      if (!_adjIn[t][et]) _adjIn[t][et] = [];
+      _adjIn[t][et].push(s);
     });
   }
 
-  function buildGraphLinks(nodes, edges) {
-    var visSet = {};
-    nodes.forEach(function(n) { visSet[n.id] = true; });
-    return edges
-      .filter(function(e) {
-        return visSet[e.source_id] && visSet[e.target_id] && edgeVisible[e.edge_type];
-      })
-      .map(function(e) {
-        var es = edgeStyleFor(e.edge_type);
-        return {
-          source: e.source_id,
-          target: e.target_id,
-          lineStyle: {
-            color: es[0],
-            type: es[1] ? 'dashed' : 'solid',
-            width: es[2],
-            curveness: 0.25,
-            opacity: 0.7
-          },
-          symbol: ['none', es[3] ? 'arrow' : 'none'],
-          symbolSize: [8, 8],
-          _edgeType: e.edge_type
-        };
+  // Compute virtual children for a real node (JS-side, for on-demand expansion)
+  function computeRelationshipGroups(nodeId) {
+    _buildAdj();
+    var MAX = 20;
+    var groups = [];
+    var groupOrder = [
+      ['contains','out'],['phase_contains','out'],['task_contains','out'],
+      ['calls','out'],['calls','in'],['imports','out'],['imports','in'],
+      ['inherits','out'],['inherits','in'],['implements','out'],['implements','in'],
+      ['uses','out'],['uses','in'],['defines','out'],['defines','in'],
+      ['relates_to','out'],['relates_to','in'],['fixed_by','out'],['fixed_by','in'],
+      ['references','out'],['references','in'],['queries','out'],['queries','in'],
+      ['writes_to','out'],['writes_to','in']
+    ];
+
+    groupOrder.forEach(function(pair) {
+      var etype = pair[0], dir = pair[1];
+      if (!edgeVisible[etype]) return;
+      var adj = dir === 'out' ? _adjOut : _adjIn;
+      var targets = (adj[nodeId] || {})[etype] || [];
+      if (!targets.length) return;
+
+      // Sort by importance
+      targets = targets.slice().sort(function(a, b) {
+        return (NODE_MAP[b] ? NODE_MAP[b].importance : 0) - (NODE_MAP[a] ? NODE_MAP[a].importance : 0);
       });
+      var truncated = Math.max(0, targets.length - MAX);
+      targets = targets.slice(0, MAX);
+
+      var label = GROUP_LABELS[etype + ':' + dir] || etype;
+      var kids = targets.map(function(tid) {
+        var n = NODE_MAP[tid];
+        if (!n) return null;
+        return {
+          id: tid, name: n.name, node_type: n.node_type,
+          language: n.language || '',
+          importance: n.importance || 0,
+          _real: true, _hasMore: true
+        };
+      }).filter(Boolean);
+
+      if (truncated) {
+        kids.push({ name: '\u2026 +' + truncated + ' more', _truncated: true });
+      }
+      if (kids.length) {
+        groups.push({ name: '[' + label + ']', _virtual: true,
+                      _edgeType: etype, _direction: dir, children: kids });
+      }
+    });
+
+    return groups.map(styleTreeNode);
   }
 
-  var _airScale = 1 + 2 * 0.2;  // default matches air-slider value="2" (tighter default; layout is already spread)
+  // Find a node by id in _graphTreeRoot (DFS)
+  function _findNodeById(root, id) {
+    if (!root) return null;
+    if (root.id === id) return root;
+    var ch = root.children || [];
+    for (var i = 0; i < ch.length; i++) {
+      var found = _findNodeById(ch[i], id);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  // Pre-populate _expandedIds for nodes within initial graphDepth.
+  // Counts only real-node depth (virtual groups don't count toward depth).
+  function _initExpandedState(node, realLevelsLeft) {
+    if (!node) return;
+    if (node._real) {
+      _expandedIds[node.id] = true;
+      if (realLevelsLeft <= 0) return;
+      (node.children || []).forEach(function(c) { _initExpandedState(c, realLevelsLeft - 1); });
+    } else {
+      // virtual / truncated: pass through without counting depth
+      (node.children || []).forEach(function(c) { _initExpandedState(c, realLevelsLeft); });
+    }
+  }
+
+  // Apply ECharts visual styles. collapsed state is driven by _expandedIds.
+  function styleTreeNode(node) {
+    var out = {};
+    Object.keys(node).forEach(function(k) { out[k] = node[k]; });
+
+    if (node._virtual) {
+      var es = edgeStyleFor(node._edgeType || 'contains');
+      var col = es[0];
+      out.symbol = 'emptyRect';
+      out.symbolSize = [12, 12];
+      out.collapsed = false; // virtual groups always auto-open with their parent
+      out.itemStyle = { color: col + '18', borderColor: col,
+                        borderWidth: 1, borderType: 'dashed' };
+      out.lineStyle = { color: col, width: es[2] || 1,
+                        type: es[1] ? 'dashed' : 'solid', opacity: 0.55 };
+      out.label = { color: col, fontSize: 10, fontStyle: 'italic',
+                    distance: 5, overflow: 'truncate' };
+    } else if (node._real) {
+      var color = nodeColor(node);
+      var imp = node.importance || 0;
+      var sz = Math.max(8, Math.min(40, 10 + imp * 30));
+      var nt = node.node_type || 'other';
+      var sym = nt === 'bug' ? 'diamond' :
+                (nt === 'class' || nt === 'phase' || nt === 'struct' ||
+                 nt === 'interface' || nt === 'enum') ? 'roundRect' : 'circle';
+      out.symbol = sym;
+      out.symbolSize = sz;
+      out.collapsed = !_expandedIds[node.id]; // collapsed unless explicitly expanded
+      out.itemStyle = { color: color + '28', borderColor: color,
+                        borderWidth: 1.5 + imp * 2 };
+      out.label = { color: '#e6edf3', fontSize: 12, distance: 7,
+                    fontWeight: imp > 0.6 ? 'bold' : 'normal',
+                    overflow: 'truncate' };
+    } else if (node._truncated) {
+      out.symbol = 'none';
+      out.label = { color: '#444d56', fontSize: 10, fontStyle: 'italic' };
+    }
+
+    if (node.children) {
+      var filteredKids = node.children.filter(function(c) {
+        if (!c._virtual) return true;
+        return edgeVisible[c._edgeType !== undefined ? c._edgeType : 'contains'];
+      });
+      out.children = filteredKids.map(styleTreeNode);
+    }
+    return out;
+  }
+
+  // Rebuild chart option and call setOption.
+  // replace=true: resets zoom/pan (use after adding new nodes or layout change)
+  // replace=false: merge mode, preserves user zoom/pan (use for toggle of existing nodes)
+  function _applyGraphOption(chart, replace) {
+    var styledRoot = styleTreeNode(_graphTreeRoot);
+    chart.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'item', confine: true, enterable: false,
+        formatter: function(params) {
+          var d = params.data;
+          if (!d) return '';
+          if (d._virtual) {
+            var cnt = (d.children || []).length;
+            return '<span style="color:#8b949e;font-size:11px">'
+              + (d.name || '') + ' &nbsp;<em>(' + cnt + ')</em></span>';
+          }
+          if (d._truncated) return '<span style="color:#444d56">' + (d.name||'') + '</span>';
+          var n = NODE_MAP[d.id];
+          return n ? tipHtml(n) : (d.name || '');
+        }
+      },
+      series: [{
+        type: 'tree',
+        data: [styledRoot],
+        layout: _graphLayout,
+        orient: _graphLayout === 'orthogonal' ? 'LR' : undefined,
+        roam: true,
+        expandAndCollapse: false, // we own all expand/collapse state via _expandedIds
+        animationDuration: 350,
+        animationDurationUpdate: 500,
+        animationEasingUpdate: 'cubicOut',
+        scaleLimit: { min: 0.08, max: 8 },
+        lineStyle: { color: '#21262d', width: 1, curveness: 0.5 },
+        emphasis: { focus: 'descendant', lineStyle: { width: 2, color: '#58a6ff44' } },
+        blur: { itemStyle: { opacity: 0.25 }, lineStyle: { opacity: 0.1 }, label: { opacity: 0.2 } },
+        labelLayout: { hideOverlap: true },
+        leaves: {
+          label: { position: _graphLayout === 'orthogonal' ? 'right' : 'bottom',
+                   align: _graphLayout === 'orthogonal' ? 'left' : 'center',
+                   fontSize: 11, color: '#8b949e', distance: 5 }
+        }
+      }]
+    }, !!replace);
+  }
 
   function drawGraph() {
     var chart = getChart('graph');
     if (!chart) return;
-    _graphZoom = 1;
+    if (!RAW.virtual_tree) { chart.clear(); return; }
 
-    var nodes = visibleNodes();
-    _graphNodes = nodes;
+    // Clone tree and init expanded state on first draw
+    if (!_graphTreeRoot) {
+      _graphTreeRoot = JSON.parse(JSON.stringify(RAW.virtual_tree));
+      _expandedIds = {};
+      _initExpandedState(_graphTreeRoot, (state.graphDepth || 3) - 1);
+      _graphFirstDraw = true;
+    }
 
-    if (!nodes.length) { chart.clear(); return; }
-
-    var allEdges = visibleEdges((function() {
-      var s = {}; nodes.forEach(function(n) { s[n.id] = true; }); return s;
-    })());
-
-    var gNodes = buildGraphNodes(nodes, 1, _airScale);
-    var links = buildGraphLinks(nodes, allEdges);
-    var categories = CATEGORY_LIST.map(function(type) {
-      return { name: type, itemStyle: { color: NODE_STYLE[type][0] } };
-    });
-
-    chart.setOption({
-      backgroundColor: 'transparent',
-      tooltip: {
-        trigger: 'item',
-        confine: true,
-        enterable: false,
-        formatter: function(params) {
-          if (params.dataType === 'edge') {
-            return '<span style="color:#8b949e;font-size:10px">' +
-              (params.data._edgeType || 'edge').replace(/_/g, ' ') + '</span>';
-          }
-          var n = NODE_MAP[params.data._id || params.data.id];
-          return n ? tipHtml(n) : params.name;
-        }
-      },
-      legend: [{ show: false, data: categories.map(function(c) { return c.name; }) }],
-      series: [{
-        type: 'graph',
-        layout: 'none',
-        roam: true,
-        draggable: true,
-        animation: false,
-        // zoom:1 = ECharts auto-fits the full position bounding box to the viewport.
-        // This guarantees all nodes are visible on load; users zoom in for detail.
-        zoom: 1.0,
-        emphasis: { scale: false, focus: 'adjacency', blurScope: 'global' },
-        blur: { itemStyle: { opacity: 0.05 }, lineStyle: { opacity: 0.02 }, label: { opacity: 0 } },
-        categories: categories,
-        data: gNodes,
-        links: links,
-        lineStyle: { opacity: 0.65 }
-      }]
-    }, true);
-
-    // Build a dataIndex lookup for dispatchAction (gNodes is stable after init)
-    var _nodeDataIndex = {};
-    gNodes.forEach(function(d, idx) { _nodeDataIndex[d._id] = idx; });
+    _applyGraphOption(chart, _graphFirstDraw);
+    _graphFirstDraw = false;
 
     chart.off('click');
-    chart.off('dblclick');
-    chart.off('graphroam');
-
-    var _focusedId = null;
-
-    function _applyFocus(focusId) {
-      var connSet = {};
-      connSet[focusId] = true;
-      allEdges.forEach(function(e) {
-        if (e.source_id === focusId) connSet[e.target_id] = true;
-        if (e.target_id === focusId) connSet[e.source_id] = true;
-      });
-      var indices = [];
-      gNodes.forEach(function(d, idx) { if (connSet[d._id]) indices.push(idx); });
-      chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: indices });
-    }
-
-    function _clearFocus() {
-      _focusedId = null;
-      chart.dispatchAction({ type: 'downplay', seriesIndex: 0 });
-    }
-
     chart.on('click', function(params) {
-      if (params.dataType !== 'node') return;
-      var nid = params.data._id || params.data.id;
-      var n = NODE_MAP[nid];
+      var d = params.data;
+      if (!d || d._truncated) return;
+
+      // Virtual group click: toggle its own collapse — find real parent via ECharts event
+      // (virtual groups open/close are handled by their collapsed:false in styleTreeNode;
+      //  clicking them does nothing extra — real parent controls visibility)
+      if (d._virtual) return;
+
+      // Real node clicked — show detail panel
+      var n = NODE_MAP[d.id];
       if (n) showDetail(n);
-      _focusedId = nid;
-      _applyFocus(nid);
+
+      // Find in our source tree
+      var treeNode = _findNodeById(_graphTreeRoot, d.id);
+      if (!treeNode) return;
+
+      var wasExpanded = !!_expandedIds[d.id];
+
+      if (!wasExpanded) {
+        // ── EXPAND ──────────────────────────────────────────────────────────
+        _expandedIds[d.id] = true;
+
+        // Add relationship groups on-demand if not yet computed
+        var addedNew = false;
+        if (treeNode._hasMore && !(treeNode.children && treeNode.children.length)) {
+          treeNode.children = computeRelationshipGroups(d.id);
+          treeNode._hasMore = false;
+          addedNew = true;
+        }
+
+        // Virtual group children: styleTreeNode already sets collapsed:false so
+        // they open automatically — no extra work needed here.
+
+        if (!treeNode.children || !treeNode.children.length) {
+          // True leaf: no children at all — skip redraw, just show detail panel
+          return;
+        }
+
+        // Redraw: replace mode if we added brand-new nodes (auto-fits viewport),
+        // merge mode if toggling pre-existing subtree (preserves user zoom)
+        _applyGraphOption(chart, addedNew);
+
+      } else {
+        // ── COLLAPSE ────────────────────────────────────────────────────────
+        delete _expandedIds[d.id];
+        // Merge mode: preserve zoom, just collapse this subtree
+        _applyGraphOption(chart, false);
+      }
     });
-
-    chart.getZr().on('click', function(evt) {
-      if (!evt.target && _focusedId) _clearFocus();
-    });
-
-    chart.on('dblclick', function(params) {
-      if (params.dataType !== 'node') return;
-      focusSubgraph(params.data._id || params.data.id, nodes, allEdges);
-    });
-
-    chart.getZr().on('dblclick', function(evt) {
-      if (!evt.target) drawGraph();
-    });
-
-    // Zoom: update only fontSize, no node rebuild, no layout change
-    var _zoomTimer = null;
-    chart.on('graphroam', function(params) {
-      if (!params.zoom) return;
-      _graphZoom = Math.max(0.3, Math.min(6, _graphZoom * params.zoom));
-      clearTimeout(_zoomTimer);
-      _zoomTimer = setTimeout(function() {
-        var fs = Math.min(52, Math.max(14, Math.round(16 * _graphZoom)));
-        chart.setOption({ series: [{ label: { fontSize: fs } }] }, false);
-      }, 80);
-    });
-  }
-
-  // 2-hop subgraph focus via dispatchAction — no data rebuild
-  function focusSubgraph(nid, nodes, edges) {
-    var chart = charts['graph'];
-    if (!chart) return;
-
-    var adj = {};
-    edges.forEach(function(e) {
-      if (!adj[e.source_id]) adj[e.source_id] = {};
-      if (!adj[e.target_id]) adj[e.target_id] = {};
-      adj[e.source_id][e.target_id] = true;
-      adj[e.target_id][e.source_id] = true;
-    });
-
-    var inScope = {};
-    inScope[nid] = true;
-    Object.keys(adj[nid] || {}).forEach(function(id1) {
-      inScope[id1] = true;
-      Object.keys(adj[id1] || {}).forEach(function(id2) { inScope[id2] = true; });
-    });
-
-    var indices = [];
-    _graphNodes.forEach(function(n, idx) { if (inScope[n.id]) indices.push(idx); });
-    chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: indices });
   }
 
   // ── Graph sidebar controls ─────────────────────────────────────────────────
@@ -1214,13 +1351,15 @@ function startApp() {
       var es = edgeStyleFor(type);
       var id = 'et-' + type;
       var cb = mk('input', { type: 'checkbox', id: id });
-      cb.checked = edgeVisible[type];
+      cb.checked = !!(edgeVisible[type]);
       cb.addEventListener('change', function() {
         edgeVisible[type] = cb.checked;
-        if (charts['graph']) drawGraph();
+        if (state.tab === 'graph') drawGraph();
       });
       var swatch = mk('span', { class: 'edge-toggle-swatch', style: 'background:' + es[0] });
-      var lbl = mk('label', { 'for': id }, [swatch, type.replace(/_/g, '\u00a0')]);
+      var EDGE_DISPLAY = { phase_contains: 'phase contains', task_contains: 'task contains' };
+      var label = EDGE_DISPLAY[type] || GROUP_LABELS[type + ':out'] || type.replace(/_/g, '\u00a0');
+      var lbl = mk('label', { 'for': id }, [swatch, label]);
       div.appendChild(mk('div', { class: 'filter-row' }, [cb, lbl]));
     });
   }
@@ -1291,7 +1430,7 @@ function startApp() {
         ]));
       });
     } else {
-      langDiv.appendChild(mk('div', { style: 'color:#888;font-size:11px;padding:2px 0' }, [(langs[0] || 'Single language') + ' only — index more languages to filter']));
+      langDiv.appendChild(mk('div', { style: 'color:#888;font-size:11px;padding:2px 0' }, [(allLangs[0] || 'Single language') + ' only — index more languages to filter']));
     }
 
     // Importance slider
@@ -1362,7 +1501,7 @@ function startApp() {
       });
     });
 
-    // Label toggle
+    // Label toggle (Graph tab — tree series supports label.show)
     var labelCb = document.getElementById('label-toggle');
     if (labelCb) {
       labelCb.addEventListener('change', function() {
@@ -1371,19 +1510,29 @@ function startApp() {
       });
     }
 
-    // Air (node spacing) slider — scales pre-computed positions, debounced, nodes only
-    var airSlider = document.getElementById('air-slider');
-    var _airDebounce = null;
-    if (airSlider) {
-      airSlider.addEventListener('input', function() {
-        var chart = charts['graph'];
-        if (!chart || state.tab !== 'graph') return;
-        _airScale = 1 + parseInt(airSlider.value) * 0.2;
-        clearTimeout(_airDebounce);
-        _airDebounce = setTimeout(function() {
-          // Only update node positions — links don't need rebuild for layout:'none'
-          chart.setOption({ series: [{ data: buildGraphNodes(_graphNodes, _graphZoom, _airScale) }] }, false);
-        }, 60);
+    // Graph layout toggle (orthogonal / radial)
+    var layoutSel = document.getElementById('graph-layout-select');
+    if (layoutSel) {
+      layoutSel.addEventListener('change', function() {
+        _graphLayout = layoutSel.value;
+        _graphFirstDraw = true; // force re-fit on layout change
+        if (state.tab === 'graph') drawGraph();
+      });
+    }
+
+    // Graph expand-depth slider — resets expanded state to new depth
+    var gDepthSlider = document.getElementById('graph-depth-slider');
+    var gDepthVal    = document.getElementById('graph-depth-val');
+    if (gDepthSlider) {
+      gDepthSlider.addEventListener('input', function() {
+        state.graphDepth = parseInt(gDepthSlider.value);
+        if (gDepthVal) gDepthVal.textContent = state.graphDepth;
+        if (_graphTreeRoot) {
+          _expandedIds = {};
+          _initExpandedState(_graphTreeRoot, state.graphDepth - 1);
+          _graphFirstDraw = true; // re-fit after depth change
+        }
+        if (state.tab === 'graph') drawGraph();
       });
     }
 

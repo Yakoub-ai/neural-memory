@@ -69,3 +69,8 @@ If the index is stale or uninitialized, inform the user and suggest the appropri
 | `/neural-stop` | `neural_stop_serve` | Stop dashboard server |
 | — | `neural_index_db` | Index live database schema |
 | — | `neural_fetch_docs` | Fetch external package documentation |
+
+## Neural Memory Agent Hook
+
+On each invocation, check neural memory staleness by running the `neural_status` tool.
+If the index is stale or uninitialized, inform the user and suggest the appropriate action.
