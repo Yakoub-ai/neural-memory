@@ -958,15 +958,18 @@ async def neural_fetch_docs(params: FetchDocsInput) -> str:
             fetched = []
             failed = []
             for pkg in sorted(packages):
-                doc = fetch_docs(pkg, params.registry)
-                if doc:
-                    storage.upsert_package_doc(
-                        doc.package_name, doc.registry,
-                        doc.to_storage_dict(), doc.fetched_at,
-                    )
-                    fetched.append(f"{pkg} ({doc.registry})")
-                else:
-                    failed.append(pkg)
+                try:
+                    doc = fetch_docs(pkg, params.registry)
+                    if doc:
+                        storage.upsert_package_doc(
+                            doc.package_name, doc.registry,
+                            doc.to_storage_dict(), doc.fetched_at,
+                        )
+                        fetched.append(f"{pkg} ({doc.registry})")
+                    else:
+                        failed.append(pkg)
+                except Exception as e:
+                    failed.append(f"{pkg} (error: {e})")
 
             lines = ["## Documentation Fetch Results\n"]
             lines.append(f"**Fetched**: {len(fetched)} packages")

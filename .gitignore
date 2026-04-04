@@ -26,3 +26,7 @@ Thumbs.db
 .mypy_cache/
 .ruff_cache/
 .pytype/
+
+# External tools
+.megamemory/
+.pytest_cache/
