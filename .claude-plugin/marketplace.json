@@ -8,7 +8,7 @@
       "name": "neural-memory",
       "source": "./",
       "description": "Knowledge graph plugin \u2014 map your codebase into layered, navigable neural nodes for Claude Code",
-      "version": "0.7.3"
+      "version": "0.7.4"
     }
   ]
 }
