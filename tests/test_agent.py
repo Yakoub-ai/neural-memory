@@ -89,7 +89,11 @@ def test_stale_commits_behind(tmp_path):
 
     _make_indexed_db(tmp_path, commit_hash=old_hash)
 
+    mock_config = MagicMock()
+    mock_config.staleness_threshold = 5
+
     with (
+        patch("neural_memory.agent.load_config", return_value=mock_config),
         patch("neural_memory.agent._git_head", return_value=new_hash),
         patch("neural_memory.agent._git_commits_since", return_value=7),
         patch("neural_memory.agent._git_changed_files_since", return_value=["src/foo.py", "src/bar.py"]),
@@ -100,6 +104,32 @@ def test_stale_commits_behind(tmp_path):
     assert report.commits_behind > 0
     assert report.commits_behind == 7
     assert len(report.stale_files) == 2
+    assert report.suggested_action == "neural-update"
+
+
+# ── Status: stale (files changed, below commit threshold) ─────────────────────
+
+def test_stale_by_files_only(tmp_path):
+    """When commits_behind is below threshold but stale_files is non-empty, status must be 'stale'."""
+    old_hash = "oldhash1" * 5
+    new_hash = "newhash2" * 5
+
+    _make_indexed_db(tmp_path, commit_hash=old_hash)
+
+    mock_config = MagicMock()
+    mock_config.staleness_threshold = 5
+
+    with (
+        patch("neural_memory.agent.load_config", return_value=mock_config),
+        patch("neural_memory.agent._git_head", return_value=new_hash),
+        patch("neural_memory.agent._git_commits_since", return_value=2),
+        patch("neural_memory.agent._git_changed_files_since", return_value=["foo.py"]),
+    ):
+        report = check_staleness(str(tmp_path))
+
+    assert report.status == "stale"
+    assert report.commits_behind == 2
+    assert report.stale_files == ["foo.py"]
     assert report.suggested_action == "neural-update"
 
 

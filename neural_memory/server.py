@@ -980,17 +980,28 @@ async def neural_fetch_docs(params: FetchDocsInput) -> str:
             return "\n".join(lines)
 
         else:
-            doc = fetch_docs(params.package_name, params.registry)
+            try:
+                doc = fetch_docs(params.package_name, params.registry)
+            except Exception as e:
+                return (
+                    f"Error fetching documentation for `{params.package_name}`: {e}"
+                )
+
             if not doc:
                 return (
                     f"No documentation found for `{params.package_name}`. "
                     f"Try specifying the registry with `registry='pypi'` (or 'npm', 'go', 'crates')."
                 )
 
-            storage.upsert_package_doc(
-                doc.package_name, doc.registry,
-                doc.to_storage_dict(), doc.fetched_at,
-            )
+            try:
+                storage.upsert_package_doc(
+                    doc.package_name, doc.registry,
+                    doc.to_storage_dict(), doc.fetched_at,
+                )
+            except Exception as e:
+                return (
+                    f"Fetched documentation for `{params.package_name}` but failed to store it: {e}"
+                )
 
             lines = [
                 f"## {doc.package_name} ({doc.registry})",

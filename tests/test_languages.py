@@ -240,7 +240,7 @@ def test_auto_detect_deduplicates(tmp_path):
 
 
 def test_auto_detect_source_files_in_subdirectory(tmp_path):
-    """Source files nested up to 3 levels are still detected."""
+    """Source files nested up to 4 levels are still detected."""
     subdir = tmp_path / "src" / "lib"
     subdir.mkdir(parents=True)
     (subdir / "module.go").write_text("package main\n")
@@ -263,7 +263,7 @@ def test_get_all_include_patterns_contains_python():
 
 def test_get_all_include_patterns_contains_typescript_glob():
     patterns = get_all_include_patterns(["typescript"])
-    assert any("ts" in p for p in patterns)
+    assert "**/*.{ts,tsx}" in patterns
 
 
 def test_get_all_include_patterns_unknown_language_ignored():
