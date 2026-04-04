@@ -16,6 +16,5 @@
     "ast",
     "python"
   ],
-  "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json"
 }
