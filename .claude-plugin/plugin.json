@@ -1,7 +1,7 @@
 {
   "name": "neural-memory",
-  "description": "A knowledge graph that maps your codebase into layered, navigable neural nodes — understand any function without reading the entire file.",
-  "version": "0.4.0",
+  "description": "A knowledge graph that maps your codebase into layered, navigable neural nodes \u2014 understand any function without reading the entire file.",
+  "version": "0.5.2",
   "author": {
     "name": "Yakoub-ai"
   },

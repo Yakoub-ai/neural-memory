@@ -5,4 +5,4 @@ from importlib.metadata import version, PackageNotFoundError
 try:
     __version__ = version("neural-memory-mcp")
 except PackageNotFoundError:
-    __version__ = "0.5.1"  # fallback when running from source without install
+    __version__ = "0.5.2"  # fallback when running from source without install
