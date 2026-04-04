@@ -209,6 +209,19 @@ def save_session_context(
                         lines.append(f"  → {', '.join(code_refs[:3])}")
                 lines.append("")
 
+            # ── Insight bank summary ────────────────────────────────────────
+            insights = storage.get_nodes_by_category("insights")
+            if insights:
+                from collections import defaultdict as _defaultdict
+                topic_counts: dict[str, int] = _defaultdict(int)
+                for ins in insights:
+                    t = ins.name.split("/", 1)[1].split(":", 1)[0].strip() if "/" in ins.name else "general"
+                    topic_counts[t] += 1
+                lines.append(f"## Insight Bank ({len(insights)} insights)\n")
+                for t, count in sorted(topic_counts.items()):
+                    lines.append(f"- **{t.title()}**: {count}")
+                lines.append("")
+
             # ── Top important code nodes ─────────────────────────────────────
             import json as _json
             top_rows = storage.conn.execute(

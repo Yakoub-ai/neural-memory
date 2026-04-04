@@ -41,6 +41,8 @@ class NodeType(str, Enum):
     PHASE = "phase"
     TASK = "task"
     SUBTASK = "subtask"
+    # ── Insights (accumulated technical knowledge) ──
+    INSIGHT = "insight"
 
 
 class EdgeType(str, Enum):

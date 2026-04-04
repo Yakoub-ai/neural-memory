@@ -671,6 +671,28 @@ async def neural_stop_serve(params: StopServeInput) -> str:
     return "No dashboard server is currently running."
 
 
+class AddInsightInput(BaseModel):
+    """Input for saving a technical insight into the knowledge graph."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    content: str = Field(..., description="The insight text — educational point about implementation choices, patterns, or architecture", min_length=10)
+    topic: str = Field(..., description="Topic area, e.g. 'authentication', 'database', 'hooks', 'caching', 'storage'", min_length=2)
+    related_files: list[str] = Field(default_factory=list, description="File paths this insight relates to (creates RELATES_TO edges to code nodes)")
+    project_root: str = Field(default=".", description="Project root directory path")
+
+
+class ListInsightsInput(BaseModel):
+    """Input for listing accumulated insights."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    topic: Optional[str] = Field(default=None, description="Filter by topic (e.g. 'authentication'). Omit to list all insights.")
+    project_root: str = Field(default=".", description="Project root directory path")
+
+
+class GenerateDocsInput(BaseModel):
+    """Input for generating technical documentation from all accumulated insights."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    project_root: str = Field(default=".", description="Project root directory path")
+
+
 class AddBugInput(BaseModel):
     """Input for manually adding a bug node."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
@@ -876,6 +898,203 @@ async def neural_add_task(params: AddTaskInput) -> str:
         f"**Edges created**: {edges_created}\n\n"
         f"Use `neural_query` to find this task or `neural_inspect` with ID `{task_id}`."
     )
+
+
+# ── Insight Tools ──
+
+@mcp.tool(
+    name="neural_add_insight",
+    annotations={
+        "title": "Neural Memory — Add Insight",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_add_insight(params: AddInsightInput) -> str:
+    """Save a technical insight into the knowledge graph.
+
+    Insights capture educational points about implementation choices, architecture
+    decisions, and technical patterns discovered during development. They accumulate
+    over time and can be synthesized into full documentation via neural_generate_docs.
+
+    Insights are deduplicated by topic + content — re-saving a near-identical insight
+    updates the existing one rather than creating a duplicate.
+    """
+    from .models import NeuralNode, NodeType, NeuralEdge, EdgeType, SummaryMode
+    from .storage import Storage
+    import hashlib
+
+    topic_normalized = params.topic.strip().lower()
+    content_key = params.content.strip().lower()[:100]
+    node_id = hashlib.sha256(
+        f"insight::{topic_normalized}::{content_key}".encode()
+    ).hexdigest()[:12]
+
+    node = NeuralNode(
+        id=node_id,
+        name=f"insight/{topic_normalized}: {params.content[:60]}",
+        node_type=NodeType.INSIGHT,
+        file_path="__manual__",
+        line_start=0,
+        line_end=0,
+        summary_short=params.content[:200],
+        summary_detailed=params.content,
+        summary_mode=SummaryMode.HEURISTIC,
+        category="insights",
+        importance=0.5,
+        content_hash=hashlib.sha256(params.content.encode()).hexdigest()[:16],
+    )
+
+    with Storage(params.project_root) as storage:
+        storage.upsert_node(node)
+        edges_created = 0
+
+        for rel_file in params.related_files[:5]:
+            code_nodes = storage.get_nodes_by_file(rel_file)
+            if not code_nodes:
+                from .context_parser import _find_code_nodes_for_file
+                code_nodes = _find_code_nodes_for_file(storage, rel_file)
+            for cn in code_nodes[:2]:
+                storage.upsert_edge(NeuralEdge(
+                    source_id=node_id,
+                    target_id=cn.id,
+                    edge_type=EdgeType.RELATES_TO,
+                    context=f"Insight: {topic_normalized}",
+                    weight=0.6,
+                ))
+                edges_created += 1
+
+    return (
+        f"# Insight Saved\n\n"
+        f"**ID**: `{node_id}`\n"
+        f"**Topic**: {topic_normalized}\n"
+        f"**Content**: {params.content[:120]}{'...' if len(params.content) > 120 else ''}\n"
+        f"**Edges created**: {edges_created}\n\n"
+        f"Use `neural_list_insights` to browse or `neural_generate_docs` to synthesize all insights."
+    )
+
+
+@mcp.tool(
+    name="neural_list_insights",
+    annotations={
+        "title": "Neural Memory — List Insights",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_list_insights(params: ListInsightsInput) -> str:
+    """List all accumulated technical insights, optionally filtered by topic.
+
+    Returns insights grouped by topic with their content summaries.
+    Use neural_generate_docs for a full documentation synthesis with code references.
+    """
+    from .storage import Storage
+    from collections import defaultdict
+
+    with Storage(params.project_root) as storage:
+        insights = storage.get_insights(topic=params.topic)
+
+    if not insights:
+        topic_msg = f" for topic '{params.topic}'" if params.topic else ""
+        return (
+            f"No insights found{topic_msg}.\n\n"
+            f"Use `neural_add_insight` to start building the insight bank."
+        )
+
+    by_topic: dict[str, list] = defaultdict(list)
+    for node in insights:
+        topic = node.name.split("/", 1)[1].split(":", 1)[0].strip() if "/" in node.name else "general"
+        by_topic[topic].append(node)
+
+    lines = [f"# Insights ({len(insights)} total)\n"]
+    for topic in sorted(by_topic.keys()):
+        nodes = by_topic[topic]
+        lines.append(f"## {topic.title()} ({len(nodes)})\n")
+        for n in nodes:
+            lines.append(f"- `{n.id}` — {n.summary_short}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    name="neural_generate_docs",
+    annotations={
+        "title": "Neural Memory — Generate Technical Docs",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_generate_docs(params: GenerateDocsInput) -> str:
+    """Generate comprehensive technical documentation from all accumulated insights.
+
+    Gathers all insight nodes, groups them by topic, follows RELATES_TO edges to
+    include code references, and produces structured markdown documentation.
+    Also writes the output to .neural-memory/technical-docs.md for persistence.
+    """
+    from .storage import Storage
+    from .models import EdgeType
+    from collections import defaultdict
+
+    with Storage(params.project_root) as storage:
+        insights = storage.get_insights()
+
+        if not insights:
+            return (
+                "# Technical Documentation\n\n"
+                "No insights have been accumulated yet.\n\n"
+                "Use `neural_add_insight` to save technical insights during development, "
+                "then run this tool again to generate documentation."
+            )
+
+        by_topic: dict[str, list] = defaultdict(list)
+        for node in insights:
+            topic = node.name.split("/", 1)[1].split(":", 1)[0].strip() if "/" in node.name else "general"
+            edges = storage.get_edges_from(node.id)
+            code_refs = []
+            for edge in edges:
+                if edge.edge_type == EdgeType.RELATES_TO:
+                    target = storage.get_node(edge.target_id)
+                    if target and target.category == "codebase":
+                        code_refs.append(f"`{target.name}` ({target.file_path}:{target.line_start})")
+            by_topic[topic].append((node, code_refs))
+
+    lines = [
+        "# Technical Documentation\n",
+        f"*Generated from {len(insights)} insight(s) across {len(by_topic)} topic(s).*\n",
+        "---\n",
+    ]
+    for topic in sorted(by_topic.keys()):
+        entries = by_topic[topic]
+        lines.append(f"## {topic.title()}\n")
+        for node, code_refs in entries:
+            lines.append(f"### {node.summary_short[:120]}\n")
+            lines.append(node.summary_detailed)
+            if code_refs:
+                lines.append(f"\n**Related code**: {', '.join(code_refs[:5])}")
+            lines.append("")
+        lines.append("---\n")
+
+    content = "\n".join(lines)
+
+    # Persist to .neural-memory/technical-docs.md
+    try:
+        from .config import get_memory_dir
+        memory_dir = get_memory_dir(params.project_root)
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        doc_path = memory_dir / "technical-docs.md"
+        doc_path.write_text(content, encoding="utf-8")
+        content += f"\n\n---\n*Written to `{doc_path}`*"
+    except Exception:
+        pass
+
+    return content
 
 
 # ── Context Tool ──

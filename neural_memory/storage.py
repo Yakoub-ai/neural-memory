@@ -250,6 +250,26 @@ class Storage:
         ).fetchall()
         return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
 
+    def get_insights(self, topic: str | None = None) -> list[NeuralNode]:
+        """Return insight nodes, optionally filtered by topic.
+
+        Topic is encoded in the node name as 'insight/{topic}: ...', so filtering
+        uses a LIKE prefix match on the name column. Results ordered by importance DESC.
+        """
+        conditions = ["category = 'insights'"]
+        params: list = []
+
+        if topic is not None:
+            conditions.append("name LIKE ?")
+            params.append(f"insight/{topic.strip().lower()}%")
+
+        where = " AND ".join(conditions)
+        rows = self.conn.execute(
+            f"SELECT data FROM nodes WHERE {where} ORDER BY importance DESC",
+            params,
+        ).fetchall()
+        return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
+
     def update_node_field(self, node_id: str, field: str, value: str) -> bool:
         """Update a single field in a node's JSON data blob.
 
