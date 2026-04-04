@@ -157,6 +157,7 @@ def _enrich_with_lsp(
             with LSPClient(project_root, server=server, language_id=lang_id) as lsp:
                 if not lsp._proc:
                     continue
+                enriched: list[NeuralNode] = []
                 for node in nodes:
                     try:
                         hover_text = lsp.hover(node.file_path, node.line_start or 1)
@@ -164,9 +165,11 @@ def _enrich_with_lsp(
                         if hover_text or diags:
                             node.lsp_hover_doc = (hover_text or "")[:500]
                             node.lsp_diagnostics = diags[:10]
-                            storage.upsert_node(node)
+                            enriched.append(node)
                     except Exception:
                         pass
+                if enriched:
+                    storage.batch_upsert_nodes(enriched)
         except Exception as e:
             logger.debug("LSP enrichment failed for %s: %s", lang_id, e)
 

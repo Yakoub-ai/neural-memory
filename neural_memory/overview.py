@@ -14,7 +14,7 @@ import hashlib
 import os
 from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from .models import NeuralNode, NeuralEdge, NodeType, EdgeType, SummaryMode
 
@@ -28,14 +28,24 @@ def _make_id(parts: str) -> str:
 
 # ── Project overview ───────────────────────────────────────────────────────────
 
-def generate_project_overview(storage: "Storage") -> NeuralNode:
+def generate_project_overview(
+    storage: "Storage",
+    nodes: Optional[list[NeuralNode]] = None,
+) -> NeuralNode:
     """Create a single project-level overview node.
 
     Summarises total counts, top modules, and key entities by importance.
+
+    Args:
+        storage: open Storage instance.
+        nodes: pre-fetched codebase node list (excluding overview nodes).
+               If None, nodes are fetched from storage.
     """
-    all_nodes = [n for n in storage.get_all_nodes() if n.category == "codebase"
+    if nodes is None:
+        nodes = [n for n in storage.get_all_nodes() if n.category == "codebase"
                  and n.node_type not in (NodeType.PROJECT_OVERVIEW, NodeType.DIRECTORY_OVERVIEW)]
 
+    all_nodes = nodes
     stats = storage.get_stats()
     total_files = stats.get("total_files", 0)
 
@@ -96,10 +106,22 @@ def generate_project_overview(storage: "Storage") -> NeuralNode:
 
 # ── Directory overviews ────────────────────────────────────────────────────────
 
-def generate_directory_overviews(storage: "Storage") -> list[NeuralNode]:
-    """Create one directory_overview node per directory that contains code nodes."""
-    all_nodes = [n for n in storage.get_all_nodes() if n.category == "codebase"
+def generate_directory_overviews(
+    storage: "Storage",
+    nodes: Optional[list[NeuralNode]] = None,
+) -> list[NeuralNode]:
+    """Create one directory_overview node per directory that contains code nodes.
+
+    Args:
+        storage: open Storage instance.
+        nodes: pre-fetched codebase node list (excluding overview nodes).
+               If None, nodes are fetched from storage.
+    """
+    if nodes is None:
+        nodes = [n for n in storage.get_all_nodes() if n.category == "codebase"
                  and n.node_type not in (NodeType.PROJECT_OVERVIEW, NodeType.DIRECTORY_OVERVIEW)]
+
+    all_nodes = nodes
 
     # Group by directory
     by_dir: dict[str, list[NeuralNode]] = defaultdict(list)
@@ -108,10 +130,10 @@ def generate_directory_overviews(storage: "Storage") -> list[NeuralNode]:
         by_dir[d].append(n)
 
     results: list[NeuralNode] = []
-    for dir_path, nodes in by_dir.items():
-        files = {n.file_path for n in nodes}
-        classes = [n for n in nodes if n.node_type == NodeType.CLASS]
-        functions = [n for n in nodes if n.node_type == NodeType.FUNCTION]
+    for dir_path, dir_nodes in by_dir.items():
+        files = {n.file_path for n in dir_nodes}
+        classes = [n for n in dir_nodes if n.node_type == NodeType.CLASS]
+        functions = [n for n in dir_nodes if n.node_type == NodeType.FUNCTION]
 
         top_entities = sorted(
             classes + functions, key=lambda n: n.importance, reverse=True
@@ -150,11 +172,19 @@ def generate_overview_edges(
     storage: "Storage",
     project_node: NeuralNode,
     dir_nodes: list[NeuralNode],
+    nodes: Optional[list[NeuralNode]] = None,
 ) -> list[NeuralEdge]:
     """Create CONTAINS edges connecting the overview hierarchy.
 
     project_overview → directory_overview (one per dir)
     directory_overview → module nodes (in that directory)
+
+    Args:
+        storage: open Storage instance.
+        project_node: the generated project overview node.
+        dir_nodes: the generated directory overview nodes.
+        nodes: pre-fetched codebase node list to extract module nodes from.
+               If None, module nodes are fetched from storage.
     """
     edges: list[NeuralEdge] = []
     dir_by_path = {n.file_path: n for n in dir_nodes}
@@ -170,9 +200,12 @@ def generate_overview_edges(
         ))
 
     # directories → modules
-    code_nodes = [n for n in storage.get_all_nodes()
-                  if n.category == "codebase"
-                  and n.node_type == NodeType.MODULE]
+    if nodes is not None:
+        code_nodes = [n for n in nodes if n.node_type == NodeType.MODULE]
+    else:
+        code_nodes = [n for n in storage.get_all_nodes()
+                      if n.category == "codebase"
+                      and n.node_type == NodeType.MODULE]
 
     for module_node in code_nodes:
         dir_path = str(Path(module_node.file_path).parent)
@@ -195,21 +228,27 @@ def generate_and_store_overviews(storage: "Storage") -> dict:
     """Generate all overview nodes and store them. Returns stats.
 
     Deletes stale overview nodes first so removed files don't linger.
+    Fetches all nodes once and passes the list through to sub-functions
+    to avoid redundant get_all_nodes() calls.
     """
     # Remove all existing overview nodes before regenerating
     for node_type in (NodeType.PROJECT_OVERVIEW, NodeType.DIRECTORY_OVERVIEW):
         for old_node in storage.get_nodes_by_type(node_type):
             storage.delete_nodes_by_file(old_node.file_path)
 
-    project_node = generate_project_overview(storage)
-    dir_nodes = generate_directory_overviews(storage)
-    edges = generate_overview_edges(storage, project_node, dir_nodes)
+    # Fetch all codebase nodes once; pass to each generator to avoid N round-trips.
+    all_code_nodes = [
+        n for n in storage.get_all_nodes()
+        if n.category == "codebase"
+        and n.node_type not in (NodeType.PROJECT_OVERVIEW, NodeType.DIRECTORY_OVERVIEW)
+    ]
 
-    storage.upsert_node(project_node)
-    for dn in dir_nodes:
-        storage.upsert_node(dn)
-    for e in edges:
-        storage.upsert_edge(e)
+    project_node = generate_project_overview(storage, nodes=all_code_nodes)
+    dir_nodes = generate_directory_overviews(storage, nodes=all_code_nodes)
+    edges = generate_overview_edges(storage, project_node, dir_nodes, nodes=all_code_nodes)
+
+    storage.batch_upsert_nodes([project_node] + dir_nodes)
+    storage.batch_upsert_edges(edges)
 
     return {
         "project_overviews": 1,

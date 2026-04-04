@@ -9,12 +9,20 @@ from .models import NeuralNode, NeuralEdge, EdgeType, NodeType
 from .storage import Storage
 
 
-def compute_importance(storage: Storage) -> None:
+def compute_importance(
+    storage: Storage,
+    nodes: Optional[list[NeuralNode]] = None,
+) -> None:
     """Compute importance scores for all nodes based on connectivity.
 
     Importance = normalized(in_degree + 0.5 * out_degree + type_weight)
 
     Uses bulk SQL queries to avoid N+1 round-trips to SQLite.
+
+    Args:
+        storage: open Storage instance.
+        nodes: pre-fetched node list to avoid an extra get_all_nodes() call.
+               If None, nodes are fetched from storage.
     """
     type_weights = {
         NodeType.MODULE: 0.3,
@@ -27,7 +35,7 @@ def compute_importance(storage: Storage) -> None:
         NodeType.OTHER: 0.05,
     }
 
-    all_nodes = storage.get_all_nodes()
+    all_nodes = nodes if nodes is not None else storage.get_all_nodes()
     if not all_nodes:
         return
 
