@@ -498,6 +498,26 @@ class Storage:
                 entries
             )
 
+    def get_all_edges_by_node(self) -> dict[str, dict[str, list[NeuralEdge]]]:
+        """Return {node_id: {'incoming': [...], 'outgoing': [...]}} for all nodes in one query."""
+        rows = self.conn.execute("SELECT * FROM edges").fetchall()
+        result: dict[str, dict[str, list[NeuralEdge]]] = {}
+        for r in rows:
+            edge = NeuralEdge(
+                source_id=r["source_id"], target_id=r["target_id"],
+                edge_type=EdgeType(r["edge_type"]),
+                context=r["context"], weight=r["weight"]
+            )
+            # outgoing for source
+            if edge.source_id not in result:
+                result[edge.source_id] = {"incoming": [], "outgoing": []}
+            result[edge.source_id]["outgoing"].append(edge)
+            # incoming for target
+            if edge.target_id not in result:
+                result[edge.target_id] = {"incoming": [], "outgoing": []}
+            result[edge.target_id]["incoming"].append(edge)
+        return result
+
     def get_all_degree_counts(self) -> dict[str, tuple[int, int]]:
         """Return {node_id: (in_degree, out_degree)} for all nodes in one query."""
         rows = self.conn.execute("""

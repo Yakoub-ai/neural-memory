@@ -175,7 +175,11 @@ def _truncated_svd(
 
 # ── Structural feature vector ──────────────────────────────────────────────────
 
-def _structural_features(node: "NeuralNode", storage: "Storage") -> list[float]:
+def _structural_features(
+    node: "NeuralNode",
+    storage: "Storage",
+    edges_by_node: dict | None = None,
+) -> list[float]:
     """Build a fixed-size structural feature vector from graph topology.
 
     Dimensions (len(_NODE_TYPES) + 5 total):
@@ -185,6 +189,12 @@ def _structural_features(node: "NeuralNode", storage: "Storage") -> list[float]:
       [N+2:N+12] edge_type profile (10 types, fraction of edges per type)
       [N+12]  complexity (log-normalized, max assumed 50)
       [N+13]  importance (already 0-1)
+
+    Args:
+        node: The node to compute features for.
+        storage: Storage instance (used for per-node queries when edges_by_node is None).
+        edges_by_node: Optional pre-fetched dict from storage.get_all_edges_by_node().
+            When provided, avoids per-node SQL queries (bulk path).
     """
     # node_type one-hot
     one_hot = [0.0] * len(_NODE_TYPES)
@@ -193,8 +203,13 @@ def _structural_features(node: "NeuralNode", storage: "Storage") -> list[float]:
     except ValueError:
         pass
 
-    in_edges = storage.get_edges_to(node.id)
-    out_edges = storage.get_edges_from(node.id)
+    if edges_by_node is not None:
+        node_edges = edges_by_node.get(node.id, {"incoming": [], "outgoing": []})
+        in_edges = node_edges["incoming"]
+        out_edges = node_edges["outgoing"]
+    else:
+        in_edges = storage.get_edges_to(node.id)
+        out_edges = storage.get_edges_from(node.id)
 
     in_deg = math.log1p(len(in_edges))
     out_deg = math.log1p(len(out_edges))
@@ -275,10 +290,11 @@ def compute_all_embeddings(storage: "Storage", nodes: list["NeuralNode"]) -> int
     content_padded = np.zeros((n, _SVD_COMPONENTS), dtype=np.float32)
     content_padded[:, :k] = content_reduced
 
-    # 3. Structural features
+    # 3. Structural features — pre-fetch all edges in one query to avoid N+1 pattern
+    edges_by_node = storage.get_all_edges_by_node()
     struct_matrix = np.zeros((n, _STRUCT_DIMS), dtype=np.float32)
     for i, node in enumerate(nodes):
-        struct_matrix[i] = _structural_features(node, storage)
+        struct_matrix[i] = _structural_features(node, storage, edges_by_node=edges_by_node)
 
     # 4. Combine + L2-normalize
     combined = np.concatenate([content_padded, struct_matrix], axis=1)  # [n, TOTAL_DIMS]
