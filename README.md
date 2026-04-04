@@ -5,7 +5,7 @@
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-green.svg)](https://github.com/Yakoub-ai/neural-memory)
 
 > A persistent knowledge graph plugin for Claude Code that maps your codebase into four layers — code, bugs, tasks, and insights — so Claude always has deep context without burning tokens re-reading files.
-
+![Screenshot of semantic graph.](https://i.imgur.com/M4IPfg4.png)
 ---
 
 ## What It Does
