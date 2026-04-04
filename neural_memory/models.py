@@ -63,6 +63,14 @@ class EdgeType(str, Enum):
     WRITES_TO = "writes_to"           # function/method → table (write access)
 
 
+# ── Task status constants ──────────────────────────────────────────────────────
+VALID_TASK_STATUSES: frozenset[str] = frozenset({"pending", "in_progress", "testing", "done"})
+TASK_STATUS_ALIASES: dict[str, str] = {"new": "pending"}
+
+VALID_BUG_STATUSES: frozenset[str] = frozenset({"open", "fixed"})
+VALID_PRIORITIES: frozenset[str] = frozenset({"low", "medium", "high"})
+
+
 class SummaryMode(str, Enum):
     """How the summary was generated."""
     HEURISTIC = "heuristic"
@@ -117,10 +125,8 @@ class NeuralNode:
     severity: str = ""              # low / medium / high / critical
     bug_status: str = ""            # open / fixed
     # ── Task-specific fields ──────────────────────────────────────────────────
-    task_status: str = ""           # pending / in_progress / done
+    task_status: str = ""           # pending / in_progress / testing / done  (see VALID_TASK_STATUSES)
     priority: str = ""              # low / medium / high
-    # ── Language ──────────────────────────────────────────────────────────────
-    language: str = ""              # "python" | "typescript" | "go" | "rust" | ...
     # ── LSP-enrichment ────────────────────────────────────────────────────────
     lsp_type_info: str = ""         # resolved type signatures from hover
     lsp_diagnostics: list[str] = field(default_factory=list)

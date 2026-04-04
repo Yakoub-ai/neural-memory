@@ -101,6 +101,32 @@ class ArchiveInput(BaseModel):
     project_root: str = Field(default=".", description="Project root directory path")
 
 
+class SaveContextInput(BaseModel):
+    """Input for saving session context snapshot."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    project_root: str = Field(default=".", description="Project root directory path")
+    token_budget: int = Field(default=800, description="Approximate token budget (100–3000)", ge=100, le=3000)
+
+
+class ListTasksInput(BaseModel):
+    """Input for listing tasks."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    project_root: str = Field(default=".", description="Project root directory path")
+    status: Optional[str] = Field(default=None, description="Filter by status: pending / in_progress / testing / done")
+    priority: Optional[str] = Field(default=None, description="Filter by priority: low / medium / high")
+    include_archived: bool = Field(default=False, description="Include archived (done) tasks")
+
+
+class UpdateTaskInput(BaseModel):
+    """Input for updating a task's status, priority, or related files."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    title_or_id: str = Field(..., description="Task name substring or full node ID to match", min_length=1)
+    task_status: Optional[str] = Field(default=None, description="New status: pending / new / in_progress / testing / done")
+    priority: Optional[str] = Field(default=None, description="New priority: low / medium / high")
+    related_files: list[str] = Field(default_factory=list, description="Additional file paths to link to this task")
+    project_root: str = Field(default=".", description="Project root directory path")
+
+
 # ── Tools ──
 
 @mcp.tool(
@@ -158,7 +184,25 @@ async def neural_index(params: IndexInput) -> str:
         for err in stats["errors"][:5]:
             lines.append(f"  - {err}")
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+
+    # One-time RTK suggestion (token compression tool)
+    import shutil
+    from pathlib import Path
+    rtk_flag = Path(params.project_root).resolve() / ".neural-memory" / "rtk_prompted"
+    if not shutil.which("rtk") and not rtk_flag.exists():
+        try:
+            rtk_flag.parent.mkdir(parents=True, exist_ok=True)
+            rtk_flag.touch()
+            result += (
+                "\n\n---\n💡 **Token tip**: RTK is not installed. "
+                "RTK compresses command outputs before they reach Claude, saving 60-90% tokens. "
+                "Install: `npm i -g rtk` — https://github.com/rtk-ai/rtk"
+            )
+        except Exception:
+            pass
+
+    return result
 
 
 @mcp.tool(
@@ -646,7 +690,7 @@ class AddTaskInput(BaseModel):
     title: str = Field(..., description="Task title", min_length=3)
     phase_name: Optional[str] = Field(default=None, description="Parent phase name (creates phase if new)")
     priority: str = Field(default="medium", description="Priority: low / medium / high")
-    task_status: str = Field(default="pending", description="Status: pending / in_progress / done")
+    task_status: str = Field(default="pending", description="Status: new (alias: pending) / pending / in_progress / testing / done")
     related_files: list[str] = Field(default_factory=list, description="Source files this task relates to")
     project_root: str = Field(default=".", description="Project root directory path")
 
@@ -747,10 +791,14 @@ async def neural_add_task(params: AddTaskInput) -> str:
     Creates PHASE_CONTAINS edges if a phase is specified, and RELATES_TO
     edges for any related files. Tasks appear in neural_query results.
     """
-    from .models import NeuralNode, NodeType, NeuralEdge, EdgeType, SummaryMode
+    from .models import NeuralNode, NodeType, NeuralEdge, EdgeType, SummaryMode, TASK_STATUS_ALIASES, VALID_TASK_STATUSES
     from .storage import Storage
     import hashlib
     from datetime import datetime, timezone
+    # Normalize status aliases (e.g., "new" → "pending")
+    status = TASK_STATUS_ALIASES.get(params.task_status, params.task_status)
+    if status not in VALID_TASK_STATUSES:
+        return f"Invalid task_status '{params.task_status}'. Valid: {sorted(VALID_TASK_STATUSES)} (or 'new' as alias for 'pending')"
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     task_id = hashlib.sha256(
@@ -767,7 +815,7 @@ async def neural_add_task(params: AddTaskInput) -> str:
         summary_short=params.title[:200],
         summary_mode=SummaryMode.HEURISTIC,
         category="tasks",
-        task_status=params.task_status,
+        task_status=status,
         priority=params.priority,
         content_hash=task_id,
     )
@@ -823,7 +871,7 @@ async def neural_add_task(params: AddTaskInput) -> str:
         f"# Task Logged\n\n"
         f"**ID**: `{task_id}`\n"
         f"**Title**: {params.title}\n"
-        f"**Status**: {params.task_status} | **Priority**: {params.priority}\n"
+        f"**Status**: {status} | **Priority**: {params.priority}\n"
         f"**Phase**: {params.phase_name or '(none)'}\n"
         f"**Edges created**: {edges_created}\n\n"
         f"Use `neural_query` to find this task or `neural_inspect` with ID `{task_id}`."
@@ -1135,6 +1183,194 @@ async def neural_ping(params: PingInput) -> str:
     """Lightweight healthcheck — confirms the neural memory MCP server is running."""
     from . import __version__
     return f"neural-memory v{__version__} — MCP server is running."
+
+
+# ── Session Context Save Tool ──
+
+@mcp.tool(
+    name="neural_save_context",
+    annotations={
+        "title": "Neural Memory — Save Session Context",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_save_context(params: SaveContextInput) -> str:
+    """Save a rich session context snapshot for cross-session continuity.
+
+    Writes active tasks/bugs with their code node connections and recent git
+    commits to .neural-memory/session_context.md. This file is automatically
+    loaded at the start of the next session (via the UserPromptSubmit hook).
+
+    Also returns the current compact context snapshot.
+    """
+    from .context import save_session_context, build_context
+
+    saved_path = save_session_context(
+        project_root=params.project_root,
+        token_budget=params.token_budget,
+    )
+    snapshot = build_context(
+        project_root=params.project_root,
+        token_budget=min(params.token_budget, 500),
+    )
+
+    if saved_path:
+        return f"# Session Context Saved\n\nSaved to: `{saved_path}`\n\n---\n\n{snapshot}"
+    return f"# Session Context\n\n(Save failed — index may be uninitialized)\n\n{snapshot}"
+
+
+# ── Task Management Tools ──
+
+@mcp.tool(
+    name="neural_list_tasks",
+    annotations={
+        "title": "Neural Memory — List Tasks",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_list_tasks(params: ListTasksInput) -> str:
+    """List tasks in the knowledge graph, grouped by status with code connections.
+
+    Returns all non-archived tasks by default. Use status/priority filters to
+    narrow results. Each task shows its linked code nodes (RELATES_TO edges).
+    """
+    from .storage import Storage
+    from .models import EdgeType
+
+    with Storage(params.project_root) as storage:
+        tasks = storage.get_tasks(
+            status=params.status,
+            priority=params.priority,
+            include_archived=params.include_archived,
+        )
+
+        if not tasks:
+            filter_desc = []
+            if params.status:
+                filter_desc.append(f"status={params.status}")
+            if params.priority:
+                filter_desc.append(f"priority={params.priority}")
+            filters = f" (filters: {', '.join(filter_desc)})" if filter_desc else ""
+            return f"No tasks found{filters}. Use `neural_add_task` to create tasks."
+
+        # Group by status
+        by_status: dict[str, list] = {}
+        for task in tasks:
+            s = task.task_status or "pending"
+            by_status.setdefault(s, []).append(task)
+
+        STATUS_ORDER = ["in_progress", "testing", "pending", "done"]
+        lines = [f"# Tasks ({len(tasks)} total)\n"]
+
+        for status_key in STATUS_ORDER + [s for s in by_status if s not in STATUS_ORDER]:
+            group = by_status.get(status_key, [])
+            if not group:
+                continue
+            lines.append(f"## {status_key.replace('_', ' ').title()} ({len(group)})\n")
+            for task in group:
+                pri = f" ({task.priority})" if task.priority else ""
+                lines.append(f"- **{task.name}**{pri} `id:{task.id}`")
+                # Show code connections
+                edges = storage.get_edges_from(task.id)
+                code_refs = []
+                for edge in edges:
+                    if edge.edge_type == EdgeType.RELATES_TO:
+                        target = storage.get_node(edge.target_id)
+                        if target and target.category == "codebase":
+                            code_refs.append(f"`{target.name}` ({target.file_path}:{target.line_start})")
+                if code_refs:
+                    lines.append(f"  → {', '.join(code_refs[:3])}")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    name="neural_update_task",
+    annotations={
+        "title": "Neural Memory — Update Task",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_update_task(params: UpdateTaskInput) -> str:
+    """Update a task's status, priority, or add related file connections.
+
+    Resolves the task by name substring or exact node ID. Updates are applied
+    to the first matching task. Normalizes 'new' status alias to 'pending'.
+    """
+    from .storage import Storage
+    from .models import TASK_STATUS_ALIASES, VALID_TASK_STATUSES, VALID_PRIORITIES, NeuralEdge, EdgeType
+    from .context_parser import _find_code_nodes_for_file
+
+    # Validate inputs
+    if params.task_status is not None:
+        normalized_status = TASK_STATUS_ALIASES.get(params.task_status, params.task_status)
+        if normalized_status not in VALID_TASK_STATUSES:
+            return f"Invalid task_status '{params.task_status}'. Valid: {sorted(VALID_TASK_STATUSES)} (or 'new' as alias for 'pending')"
+    else:
+        normalized_status = None
+
+    if params.priority is not None and params.priority not in VALID_PRIORITIES:
+        return f"Invalid priority '{params.priority}'. Valid: {sorted(VALID_PRIORITIES)}"
+
+    with Storage(params.project_root) as storage:
+        # Try exact ID match first
+        task = storage.get_node(params.title_or_id)
+
+        # Fall back to name substring search among task nodes
+        if task is None or task.category != "tasks":
+            all_tasks = storage.get_tasks(include_archived=True)
+            search = params.title_or_id.lower()
+            matches = [t for t in all_tasks if search in t.name.lower()]
+            if not matches:
+                return f"No task found matching '{params.title_or_id}'. Use `neural_list_tasks` to see all tasks."
+            task = matches[0]
+
+        changes: list[str] = []
+
+        if normalized_status is not None:
+            storage.update_node_field(task.id, "task_status", normalized_status)
+            changes.append(f"status → {normalized_status}")
+
+        if params.priority is not None:
+            storage.update_node_field(task.id, "priority", params.priority)
+            changes.append(f"priority → {params.priority}")
+
+        # Add new file relations
+        edges_added = 0
+        if params.related_files:
+            for rel_file in params.related_files[:5]:
+                for cn in _find_code_nodes_for_file(storage, rel_file)[:2]:
+                    storage.upsert_edge(NeuralEdge(
+                        source_id=task.id,
+                        target_id=cn.id,
+                        edge_type=EdgeType.RELATES_TO,
+                        context=f"Task: {task.name[:60]}",
+                        weight=0.7,
+                    ))
+                    edges_added += 1
+            if edges_added:
+                changes.append(f"linked {edges_added} new code node(s)")
+
+    if not changes:
+        return f"No changes requested for task '{task.name}'."
+
+    return (
+        f"# Task Updated\n\n"
+        f"**Task**: {task.name}\n"
+        f"**ID**: `{task.id}`\n"
+        f"**Changes**: {', '.join(changes)}\n\n"
+        f"Use `neural_list_tasks` to see all tasks or `neural_inspect` with ID `{task.id}` for details."
+    )
 
 
 # Entry point

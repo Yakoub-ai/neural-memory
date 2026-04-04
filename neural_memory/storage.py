@@ -218,6 +218,61 @@ class Storage:
         ).fetchall()
         return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
 
+    def get_tasks(
+        self,
+        status: str | None = None,
+        priority: str | None = None,
+        include_archived: bool = False,
+    ) -> list[NeuralNode]:
+        """Return task nodes with optional filters.
+
+        Uses json_extract() on the data blob for status/priority filtering.
+        Results ordered by importance DESC.
+        """
+        conditions = ["category = 'tasks'"]
+        params: list = []
+
+        if not include_archived:
+            conditions.append("(archived IS NULL OR archived = 0)")
+
+        if status is not None:
+            conditions.append("json_extract(data, '$.task_status') = ?")
+            params.append(status)
+
+        if priority is not None:
+            conditions.append("json_extract(data, '$.priority') = ?")
+            params.append(priority)
+
+        where = " AND ".join(conditions)
+        rows = self.conn.execute(
+            f"SELECT data FROM nodes WHERE {where} ORDER BY importance DESC",
+            params,
+        ).fetchall()
+        return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
+
+    def update_node_field(self, node_id: str, field: str, value: str) -> bool:
+        """Update a single field in a node's JSON data blob.
+
+        Reads the node, updates the field in the deserialized dict,
+        then writes the full JSON blob back. Returns True if node found.
+        Only allows updating known safe fields (task_status, priority, bug_status, severity).
+        """
+        _ALLOWED_FIELDS = {"task_status", "priority", "bug_status", "severity"}
+        if field not in _ALLOWED_FIELDS:
+            raise ValueError(f"Field '{field}' is not updatable. Allowed: {_ALLOWED_FIELDS}")
+
+        node = self.get_node(node_id)
+        if not node:
+            return False
+
+        setattr(node, field, value)
+        self.conn.execute(
+            "UPDATE nodes SET data = ? WHERE id = ?",
+            (json.dumps(node.to_dict()), node_id)
+        )
+        self.conn.commit()
+        return True
+
     def archive_node(self, node_id: str) -> bool:
         """Mark a single node as archived and decay its importance by 0.3×."""
         node = self.get_node(node_id)

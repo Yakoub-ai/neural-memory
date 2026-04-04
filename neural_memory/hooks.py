@@ -51,6 +51,26 @@ def prompt_context() -> None:
         # Silent failure — never break the user's workflow
         pass
 
+    # Inject saved session context once per process lifetime (session start only)
+    if not query_hint:
+        try:
+            import os as _os
+            from pathlib import Path
+            from .config import get_memory_dir
+            # Use a per-process flag to inject only on the first empty-prompt call
+            _flag_key = f"_neural_ctx_injected_{_os.getpid()}"
+            if not _os.environ.get(_flag_key):
+                _os.environ[_flag_key] = "1"
+                ctx_file = get_memory_dir(project_root) / "session_context.md"
+                if ctx_file.exists():
+                    saved = ctx_file.read_text(encoding="utf-8").strip()
+                    if saved:
+                        print("<!-- neural-memory: saved session context -->")
+                        print(saved)
+                        print("<!-- /neural-memory: saved session context -->")
+        except Exception:
+            pass
+
 
 def session_end() -> None:
     """Stop hook — archive completed items and optionally auto-update.
@@ -62,6 +82,13 @@ def session_end() -> None:
     Both operations are best-effort and silent on failure.
     """
     project_root = os.environ.get("CLAUDE_PROJECT_ROOT", ".").strip() or "."
+
+    # Save session context snapshot for cross-session continuity
+    try:
+        from .context import save_session_context
+        save_session_context(project_root=project_root)
+    except Exception:
+        pass
 
     # Archive completed items
     try:

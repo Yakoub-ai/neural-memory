@@ -146,3 +146,113 @@ def build_context(
 
     lines.append("<!-- /neural-memory -->")
     return "\n".join(lines)
+
+
+def save_session_context(
+    project_root: str = ".",
+    token_budget: int = 800,
+) -> str:
+    """Save a rich session context snapshot for cross-session continuity.
+
+    Richer than build_context() — includes code node connections for active
+    tasks/bugs and the last 5 git commits. Writes to:
+        {project_root}/.neural-memory/session_context.md
+
+    Returns the path written, or empty string on failure.
+    """
+    import subprocess
+    from pathlib import Path
+
+    scale = token_budget / 800.0
+    lines: list[str] = ["# Neural Memory — Session Context\n"]
+
+    try:
+        from .storage import Storage
+        from .models import NodeType, EdgeType, NeuralNode
+
+        with Storage(project_root) as storage:
+            # ── Active tasks with code connections ──────────────────────────
+            tasks = storage.get_active_items("tasks")
+            if tasks:
+                lines.append(f"## Active Tasks ({len(tasks)})\n")
+                for task in tasks[:8]:
+                    status = f"[{task.task_status}]" if task.task_status else ""
+                    priority = f"({task.priority})" if task.priority else ""
+                    lines.append(f"- {status}{priority} **{task.name}**")
+                    # Include RELATES_TO code node connections
+                    edges = storage.get_edges_from(task.id)
+                    code_refs = []
+                    for edge in edges:
+                        if edge.edge_type == EdgeType.RELATES_TO:
+                            target = storage.get_node(edge.target_id)
+                            if target and target.category == "codebase":
+                                code_refs.append(f"`{target.name}` ({target.file_path}:{target.line_start})")
+                    if code_refs:
+                        lines.append(f"  → {', '.join(code_refs[:3])}")
+                lines.append("")
+
+            # ── Active bugs with code connections ───────────────────────────
+            bugs = storage.get_active_items("bugs")
+            if bugs:
+                lines.append(f"## Active Bugs ({len(bugs)})\n")
+                for bug in bugs[:5]:
+                    severity = f"[{bug.severity}]" if bug.severity else ""
+                    lines.append(f"- {severity} **{bug.name}**")
+                    edges = storage.get_edges_from(bug.id)
+                    code_refs = []
+                    for edge in edges:
+                        if edge.edge_type == EdgeType.RELATES_TO:
+                            target = storage.get_node(edge.target_id)
+                            if target and target.category == "codebase":
+                                code_refs.append(f"`{target.name}` ({target.file_path}:{target.line_start})")
+                    if code_refs:
+                        lines.append(f"  → {', '.join(code_refs[:3])}")
+                lines.append("")
+
+            # ── Top important code nodes ─────────────────────────────────────
+            import json as _json
+            top_rows = storage.conn.execute(
+                """SELECT data FROM nodes
+                   WHERE category = 'codebase' AND (archived IS NULL OR archived = 0)
+                   ORDER BY importance DESC LIMIT 5"""
+            ).fetchall()
+            top_code_nodes = [NeuralNode.from_dict(_json.loads(r["data"])) for r in top_rows]
+            if top_code_nodes:
+                lines.append("## Key Nodes\n")
+                for node in top_code_nodes:
+                    summary = node.summary_short or ""
+                    lines.append(f"- `{node.name}` ({node.file_path}:{node.line_start}) — {summary[:80]}")
+                lines.append("")
+
+    except Exception:
+        pass
+
+    # ── Recent git commits ───────────────────────────────────────────────────
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-5"],
+            capture_output=True, text=True, cwd=project_root, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            lines.append("## Recent Commits\n")
+            for commit_line in result.stdout.strip().splitlines():
+                lines.append(f"- {commit_line}")
+            lines.append("")
+    except Exception:
+        pass
+
+    if len(lines) <= 1:
+        return ""  # Nothing to save
+
+    content = "\n".join(lines)
+
+    # Write to .neural-memory/session_context.md
+    try:
+        from .config import get_memory_dir
+        memory_dir = get_memory_dir(project_root)
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        out_path = memory_dir / "session_context.md"
+        out_path.write_text(content, encoding="utf-8")
+        return str(out_path)
+    except Exception:
+        return ""

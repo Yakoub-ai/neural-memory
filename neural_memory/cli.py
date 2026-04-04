@@ -7,6 +7,7 @@ import json
 import platform
 import shutil
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -189,6 +190,27 @@ def _append_hook(claude_md: Path) -> bool:
     return True
 
 
+def _rtk_on_path() -> bool:
+    """Return True if rtk is installed and on PATH."""
+    return shutil.which("rtk") is not None
+
+
+def _offer_rtk_install() -> None:
+    """Explain RTK and offer to install it via npm."""
+    print("RTK (Token Killer) is not installed.")
+    print("  RTK is a CLI proxy that compresses command outputs before they reach Claude,")
+    print("  saving 60-90% of tokens on git/file operations.")
+    print("  Install docs: https://github.com/rtk-ai/rtk")
+    if input("  Install now with npm? [y/N] > ").strip().lower() == "y":
+        result = subprocess.run(["npm", "i", "-g", "rtk"], check=False)
+        if result.returncode == 0:
+            print("  [OK] RTK installed successfully\n")
+        else:
+            print("  [!!] RTK install failed — install manually: npm i -g rtk\n")
+    else:
+        print("  Skipped — install later: npm i -g rtk\n")
+
+
 def cmd_doctor() -> None:
     """Check environment health."""
     print("Neural Memory - Doctor\n")
@@ -232,6 +254,12 @@ def cmd_doctor() -> None:
         print("  [OK] neural-memory command on PATH")
     else:
         print("  [ !] neural-memory not on PATH (will use python -m fallback)")
+
+    # RTK
+    if _rtk_on_path():
+        print("  [OK] rtk on PATH (token compression active)")
+    else:
+        print("  [ !] rtk not found — install for 60-90% token savings: npm i -g rtk")
 
     if ok:
         print("\nAll checks passed.")
@@ -307,6 +335,13 @@ def cmd_install() -> None:
             print("  (hook already present)\n")
     else:
         print("  Skipped\n")
+
+    # 6. RTK
+    print("RTK (Token Killer) — optional token compression tool")
+    if _rtk_on_path():
+        print("  [OK] RTK already installed\n")
+    else:
+        _offer_rtk_install()
 
     print("Setup complete! Run /neural-index in Claude Code to build your knowledge graph.")
 
