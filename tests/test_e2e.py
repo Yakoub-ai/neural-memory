@@ -76,7 +76,9 @@ def test_e2e_storage_class_exists(self_storage):
 
 
 def test_e2e_parse_file_function_exists(self_storage):
-    results = self_storage.search_nodes("parse_file", limit=10)
+    # Use higher limit: multiple parsers define parse_file methods, pushing the
+    # module-level function from parser.py further down the ranked list.
+    results = self_storage.search_nodes("parse_file", limit=30)
     assert any(n.name == "parse_file" for n in results)
 
 

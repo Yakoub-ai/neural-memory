@@ -25,23 +25,31 @@ if TYPE_CHECKING:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-_MODEL_VERSION = "tfidf-svd-v2"   # bumped: 14 node types, 10 edge types
+_MODEL_VERSION = "tfidf-svd-v2"   # bumped: 23 node types, 11 edge types
 _SVD_COMPONENTS = 100    # content vector dimensions (kept compact)
-_STRUCT_DIMS = 28        # 14 node one-hot + 2 degrees + 10 edge profile + 2 meta
-_TOTAL_DIMS = _SVD_COMPONENTS + _STRUCT_DIMS  # 128 floats = 512 bytes per node
+_STRUCT_DIMS = 38        # 23 node one-hot + 2 degrees + 11 edge profile + 2 meta
+_TOTAL_DIMS = _SVD_COMPONENTS + _STRUCT_DIMS  # 138 floats = 552 bytes per node
 _PRUNE_THRESHOLD = 0.10  # min cosine similarity to explore a branch
 _BRANCH_DECAY = 0.5      # score multiplier per graph hop
 
-# Edge-type ordering for the structural profile vector (10 types)
+# Edge-type ordering for the structural profile vector (11 types)
 _EDGE_TYPES = [
-    "calls", "imports", "inherits", "defines", "uses", "contains",
+    "calls", "imports", "inherits", "implements", "defines", "uses", "contains",
     "relates_to", "fixed_by", "phase_contains", "task_contains",
 ]
 
-# Node-type ordering for the one-hot portion (14 types)
+# Node-type ordering for the one-hot portion (23 types)
 _NODE_TYPES = [
+    # Core AST types
     "module", "class", "function", "method", "config", "export", "type_def", "other",
-    "project_overview", "directory_overview", "bug", "phase", "task", "subtask",
+    # Multi-language constructs
+    "interface", "trait", "struct", "enum", "type_alias", "constant",
+    # SQL constructs
+    "table", "view", "stored_procedure",
+    # Generated overviews
+    "project_overview", "directory_overview",
+    # Bugs / tasks
+    "bug", "phase", "task", "subtask",
 ]
 
 
@@ -170,13 +178,13 @@ def _truncated_svd(
 def _structural_features(node: "NeuralNode", storage: "Storage") -> list[float]:
     """Build a fixed-size structural feature vector from graph topology.
 
-    Dimensions (28 total):
-      [0:14]  node_type one-hot (14 types)
-      [14]    in_degree (log-normalized)
-      [15]    out_degree (log-normalized)
-      [16:26] edge_type profile (10 types, fraction of edges per type)
-      [26]    complexity (log-normalized, max assumed 50)
-      [27]    importance (already 0-1)
+    Dimensions (len(_NODE_TYPES) + 5 total):
+      [0:N]   node_type one-hot (N = len(_NODE_TYPES) types)
+      [N]     in_degree (log-normalized)
+      [N+1]   out_degree (log-normalized)
+      [N+2:N+12] edge_type profile (10 types, fraction of edges per type)
+      [N+12]  complexity (log-normalized, max assumed 50)
+      [N+13]  importance (already 0-1)
     """
     # node_type one-hot
     one_hot = [0.0] * len(_NODE_TYPES)

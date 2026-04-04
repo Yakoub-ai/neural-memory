@@ -32,7 +32,7 @@ def test_get_memory_dir_idempotent(tmp_path):
 def test_default_config_values(tmp_path):
     cfg = NeuralConfig(project_root=str(tmp_path))
     assert cfg.index_mode == IndexMode.BOTH
-    assert "**/*.py" in cfg.include_patterns
+    assert cfg.include_patterns == ["auto"]  # resolves at index time
     assert cfg.redaction.enabled is True
     assert cfg.redaction.builtin_patterns is True
     assert cfg.staleness_threshold == 5

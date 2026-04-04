@@ -16,7 +16,7 @@ from neural_memory.embeddings import (
     _structural_features, _pack, _unpack, _cosine,
     compute_all_embeddings, update_embeddings, embed_query,
     semantic_search, is_available,
-    _TOTAL_DIMS, _SVD_COMPONENTS, _STRUCT_DIMS,
+    _TOTAL_DIMS, _SVD_COMPONENTS, _STRUCT_DIMS, _NODE_TYPES,
 )
 
 
@@ -34,7 +34,7 @@ def _node(
     line_start: int = 1,
     line_end: int = 10,
 ) -> NeuralNode:
-    from neural_memory.parser import _node_id
+    from neural_memory.ts_parser import _node_id
     nid = _node_id(file_path, name, node_type)
     return NeuralNode(
         id=nid,
@@ -206,8 +206,8 @@ class TestStructuralFeatures(object):
         )
         storage.upsert_edge(edge)
         feats = _structural_features(callee, storage)
-        # in_degree at index 14 (after 14 node-type one-hot slots)
-        assert feats[14] > 0
+        # in_degree is at index len(_NODE_TYPES), right after the one-hot block
+        assert feats[len(_NODE_TYPES)] > 0
 
 
 # ── Pack / unpack tests ────────────────────────────────────────────────────────

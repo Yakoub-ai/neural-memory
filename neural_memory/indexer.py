@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import logging
 import os
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .config import NeuralConfig, load_config
+from .config import NeuralConfig, load_config, resolve_include_patterns
 from .context_parser import import_context_logs
 from .embeddings import compute_all_embeddings, update_embeddings, is_available as embeddings_available
+from .languages import detect_language, get_lsp_server
 from .lsp_client import LSPClient, is_lsp_available
 from .models import NeuralNode, NeuralEdge, IndexMode, IndexState
 from .overview import generate_and_store_overviews
@@ -23,22 +27,44 @@ from .storage import Storage
 from .summarizer import summarize_node
 from .graph import compute_importance
 
+logger = logging.getLogger(__name__)
+
 
 def _discover_files(config: NeuralConfig) -> list[str]:
-    """Discover all Python files matching include/exclude patterns."""
+    """Discover all source files matching include/exclude patterns.
+
+    Resolves 'auto' in include_patterns by detecting languages from the project.
+    """
     root = Path(config.project_root).resolve()
     files = []
 
-    for include in config.include_patterns:
-        for path in root.glob(include):
-            rel_path = str(path.relative_to(root))
-            # Check excludes
-            excluded = any(
-                fnmatch.fnmatch(rel_path, exc) or fnmatch.fnmatch(str(path), exc)
-                for exc in config.exclude_patterns
-            )
-            if not excluded and path.is_file():
-                files.append(rel_path)
+    # Resolve auto-detection if needed
+    effective_patterns = resolve_include_patterns(config)
+
+    for include in effective_patterns:
+        # Handle brace expansion like "**/*.{ts,tsx}" by splitting into multiple globs
+        if "{" in include and "}" in include:
+            import re
+            match = re.search(r'\{([^}]+)\}', include)
+            if match:
+                options = match.group(1).split(",")
+                prefix = include[:match.start()]
+                suffix = include[match.end():]
+                sub_patterns = [f"{prefix}{opt}{suffix}" for opt in options]
+            else:
+                sub_patterns = [include]
+        else:
+            sub_patterns = [include]
+
+        for pat in sub_patterns:
+            for path in root.glob(pat):
+                rel_path = str(path.relative_to(root))
+                excluded = any(
+                    fnmatch.fnmatch(rel_path, exc) or fnmatch.fnmatch(str(path), exc)
+                    for exc in config.exclude_patterns
+                )
+                if not excluded and path.is_file():
+                    files.append(rel_path)
 
     return sorted(set(files))
 
@@ -96,29 +122,53 @@ def _enrich_with_lsp(
     storage,
     all_nodes: dict,
     project_root: str,
-    lsp_server: str = "auto",
+    lsp_servers_override: dict[str, str] | None = None,
 ) -> None:
-    """Enrich high-importance code nodes with LSP hover info and diagnostics."""
+    """Enrich high-importance code nodes with LSP hover info and diagnostics.
+
+    Groups nodes by language and spawns one LSPClient per detected language,
+    using the best available LSP server for each.
+    """
     high_importance = [
         n for n in all_nodes.values()
         if n.importance >= 0.3 and n.file_path and not n.file_path.startswith("__")
+        and n.category == "codebase"
     ]
     if not high_importance:
         return
 
-    with LSPClient(project_root, server=lsp_server) as lsp:
-        if not lsp._proc:
-            return  # LSP failed to start
-        for node in high_importance:
-            try:
-                hover_text = lsp.hover(node.file_path, node.line_start or 1)
-                diags = lsp.diagnostics(node.file_path)
-                if hover_text or diags:
-                    node.lsp_hover_doc = (hover_text or "")[:500]
-                    node.lsp_diagnostics = diags[:10]
-                    storage.upsert_node(node)
-            except Exception:
-                pass
+    # Group by language
+    by_language: dict[str, list[NeuralNode]] = {}
+    for node in high_importance:
+        lang_id = node.language or "python"  # fallback for old nodes
+        by_language.setdefault(lang_id, []).append(node)
+
+    for lang_id, nodes in by_language.items():
+        # Determine server to use
+        if lsp_servers_override and lang_id in lsp_servers_override:
+            server = lsp_servers_override[lang_id]
+        else:
+            server = get_lsp_server(lang_id) or "none"
+
+        if server == "none":
+            continue
+
+        try:
+            with LSPClient(project_root, server=server, language_id=lang_id) as lsp:
+                if not lsp._proc:
+                    continue
+                for node in nodes:
+                    try:
+                        hover_text = lsp.hover(node.file_path, node.line_start or 1)
+                        diags = lsp.diagnostics(node.file_path)
+                        if hover_text or diags:
+                            node.lsp_hover_doc = (hover_text or "")[:500]
+                            node.lsp_diagnostics = diags[:10]
+                            storage.upsert_node(node)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("LSP enrichment failed for %s: %s", lang_id, e)
 
 
 def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -> dict:
@@ -149,8 +199,10 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
 
     root = Path(config.project_root).resolve()
 
-    # Phase 1: Parse all files
-    for rel_path in files:
+    # Phase 1: Parse all files in parallel using ThreadPoolExecutor.
+    # Each thread gets its own parser state via the module-level singleton which
+    # is thread-safe (tree-sitter parsers are independent per-instance).
+    def _parse_one(rel_path: str) -> tuple[str, list, list, Optional[Exception]]:
         full_path = root / rel_path
         try:
             source = full_path.read_text(encoding="utf-8", errors="replace")
@@ -158,15 +210,24 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
             if parser:
                 nodes, edges = parser.parse_file(str(rel_path), source=source)
             else:
-                # Fallback to Python parser for .py files without registry entry
                 nodes, edges = _py_parse_file(str(rel_path), source=source)
-            for node in nodes:
-                all_nodes[node.id] = node
-            all_edges.extend(edges)
-            stats["files_processed"] += 1
+            return rel_path, nodes, edges, None
         except Exception as e:
-            stats["errors"].append(f"{rel_path}: {str(e)}")
-            stats["files_skipped"] += 1
+            return rel_path, [], [], e
+
+    max_workers = min(os.cpu_count() or 4, 16)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_parse_one, f): f for f in files}
+        for future in as_completed(futures):
+            rel_path, nodes, edges, err = future.result()
+            if err:
+                stats["errors"].append(f"{rel_path}: {err}")
+                stats["files_skipped"] += 1
+            else:
+                for node in nodes:
+                    all_nodes[node.id] = node
+                all_edges.extend(edges)
+                stats["files_processed"] += 1
 
     # Phase 2: Resolve cross-file edges
     all_edges = resolve_edges(all_nodes, all_edges)
@@ -235,11 +296,13 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
         compute_importance(storage)
 
         # Phase 5.1: LSP enrichment — add type info + diagnostics to high-importance nodes
-        lsp_server_pref = config.lsp_server if hasattr(config, "lsp_server") else "auto"
         lsp_on = getattr(config, "lsp_enabled", True)
-        if lsp_on and lsp_server_pref != "none" and is_lsp_available():
+        if lsp_on:
             try:
-                _enrich_with_lsp(storage, all_nodes, config.project_root, lsp_server_pref)
+                _enrich_with_lsp(
+                    storage, all_nodes, config.project_root,
+                    lsp_servers_override=getattr(config, "lsp_servers", {}),
+                )
             except Exception as e:
                 stats["errors"].append(f"lsp: {e}")
 
@@ -322,10 +385,11 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
         changed_files: set[str] = set()
 
         # Method 1: Git diff
+        effective_patterns = resolve_include_patterns(config)
         if state.last_commit_hash:
             git_changes = _get_git_changed_files(state.last_commit_hash, config.project_root)
             for f in git_changes:
-                if any(fnmatch.fnmatch(f, pat) for pat in config.include_patterns):
+                if any(fnmatch.fnmatch(f, pat) for pat in effective_patterns):
                     changed_files.add(f)
 
         # Method 2: File hash comparison
@@ -346,10 +410,11 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
 
         # Removed files — only remove files whose extension is covered by include_patterns.
         # Context logs (.md), overview markers, etc. are stored in file_hashes but are NOT
-        # Python source files; removing them would delete bug/task nodes.
-        # Extract allowed extensions from include patterns (e.g. "**/*.py" → ".py").
-        tracked_exts: set[str] = set()
-        for pat in config.include_patterns:
+        # source files; removing them would delete bug/task nodes.
+        from .languages import supported_extensions
+        tracked_exts: set[str] = supported_extensions()
+        # Also add any manually specified extensions from include_patterns
+        for pat in effective_patterns:
             if "." in pat:
                 tracked_exts.add("." + pat.rsplit(".", 1)[1])
         candidate_removed = set(indexed_files.keys()) - current_files

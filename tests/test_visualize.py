@@ -21,7 +21,7 @@ from neural_memory.visualize import (
 def _node(name: str, node_type: NodeType = NodeType.FUNCTION,
           file_path: str = "mod.py", importance: float = 0.5,
           summary_short: str = "") -> NeuralNode:
-    from neural_memory.parser import _node_id
+    from neural_memory.ts_parser import _node_id
     nid = _node_id(file_path, name, node_type)
     return NeuralNode(
         id=nid, name=name, node_type=node_type, file_path=file_path,

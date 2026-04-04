@@ -1,4 +1,4 @@
-"""Tests for neural_memory.parser — parse_file, resolve_edges, helpers."""
+"""Tests for neural_memory.parser — parse_file and resolve_edges."""
 
 import pytest
 
@@ -6,14 +6,7 @@ from neural_memory.models import NodeType, EdgeType, NeuralNode
 from neural_memory.parser import (
     parse_file,
     resolve_edges,
-    _node_id,
-    _estimate_complexity,
-    _extract_calls,
-    _extract_imports,
-    _get_signature,
-    _get_decorators,
 )
-import ast
 
 
 # ── parse_file: basic cases ────────────────────────────────────────────────────
@@ -27,12 +20,12 @@ def test_empty_file_produces_one_module_node(tmp_path):
     assert len(edges) == 0
 
 
-def test_syntax_error_returns_empty(tmp_path):
+def test_syntax_error_still_returns_module(tmp_path):
+    # tree-sitter is fault-tolerant: always returns at least a module node
     f = tmp_path / "bad.py"
     f.write_text("def (broken:", encoding="utf-8")
     nodes, edges = parse_file(str(f))
-    assert nodes == []
-    assert edges == []
+    assert any(n.node_type == NodeType.MODULE for n in nodes)
 
 
 def test_module_docstring_captured(tmp_path):
@@ -180,80 +173,6 @@ def test_parse_from_source_string(tmp_path):
     nodes, _ = parse_file(str(f), source=src)
     func = next(n for n in nodes if n.node_type == NodeType.FUNCTION)
     assert func.name == "greet"
-
-
-# ── _node_id ────────────────────────────────────────────────────────────────────
-
-def test_node_id_is_deterministic():
-    id1 = _node_id("foo.py", "MyClass", NodeType.CLASS)
-    id2 = _node_id("foo.py", "MyClass", NodeType.CLASS)
-    assert id1 == id2
-    assert len(id1) == 12
-
-
-def test_node_id_differs_on_different_inputs():
-    id1 = _node_id("foo.py", "MyClass", NodeType.CLASS)
-    id2 = _node_id("bar.py", "MyClass", NodeType.CLASS)
-    assert id1 != id2
-
-
-# ── _estimate_complexity ────────────────────────────────────────────────────────
-
-def test_complexity_minimal():
-    tree = ast.parse("def f():\n    return 1")
-    func_node = tree.body[0]
-    assert _estimate_complexity(func_node) == 1
-
-
-def test_complexity_with_if():
-    tree = ast.parse("def f(x):\n    if x:\n        return 1\n    return 0")
-    func_node = tree.body[0]
-    assert _estimate_complexity(func_node) >= 2
-
-
-def test_complexity_with_for_and_while():
-    src = "def f(lst):\n    for i in lst:\n        while i > 0:\n            i -= 1"
-    tree = ast.parse(src)
-    assert _estimate_complexity(tree.body[0]) >= 3
-
-
-# ── _extract_calls ──────────────────────────────────────────────────────────────
-
-def test_extract_calls_name():
-    tree = ast.parse("def f():\n    foo()\n    bar()")
-    calls = _extract_calls(tree.body[0])
-    assert "foo" in calls
-    assert "bar" in calls
-
-
-def test_extract_calls_attribute():
-    tree = ast.parse("def f():\n    obj.method()")
-    calls = _extract_calls(tree.body[0])
-    assert "method" in calls
-
-
-# ── _extract_imports ────────────────────────────────────────────────────────────
-
-def test_extract_imports_plain():
-    tree = ast.parse("import os")
-    imports = _extract_imports(tree)
-    names = [name for name, _ in imports]
-    assert "os" in names
-
-
-def test_extract_imports_from():
-    tree = ast.parse("from pathlib import Path")
-    imports = _extract_imports(tree)
-    names = [name for name, _ in imports]
-    assert any("Path" in n for n in names)
-
-
-def test_extract_imports_alias():
-    tree = ast.parse("import numpy as np")
-    imports = _extract_imports(tree)
-    names, aliases = zip(*imports)
-    assert "numpy" in names
-    assert "np" in aliases
 
 
 # ── resolve_edges ────────────────────────────────────────────────────────────────

@@ -24,19 +24,16 @@ from typing import Optional
 
 # ── Availability ───────────────────────────────────────────────────────────────
 
-_SUPPORTED_SERVERS = ["pyright-langserver", "pylsp", "pyright"]
+def is_lsp_available(language_id: str = "python") -> bool:
+    """Return True if any LSP server for the given language is on PATH."""
+    from .languages import get_lsp_server
+    return get_lsp_server(language_id) is not None
 
-def is_lsp_available() -> bool:
-    """Return True if any supported LSP server binary is on PATH."""
-    return any(shutil.which(s) for s in _SUPPORTED_SERVERS)
 
-
-def _detect_server() -> Optional[str]:
-    """Return the first available LSP server binary name."""
-    for s in _SUPPORTED_SERVERS:
-        if shutil.which(s):
-            return s
-    return None
+def _detect_server(language_id: str = "python") -> Optional[str]:
+    """Return the first available LSP server binary for a language."""
+    from .languages import get_lsp_server
+    return get_lsp_server(language_id)
 
 
 # ── JSON-RPC framing ───────────────────────────────────────────────────────────
@@ -80,9 +77,10 @@ class LSPClient:
     _TIMEOUT = 5.0     # seconds to wait for a response
     _INIT_TIMEOUT = 8.0
 
-    def __init__(self, project_root: str, server: str = "auto"):
+    def __init__(self, project_root: str, server: str = "auto", language_id: str = "python"):
         self._root = Path(project_root).resolve()
-        self._server = server if server != "auto" else (_detect_server() or "")
+        self._language_id = language_id
+        self._server = server if server not in ("auto", "") else (_detect_server(language_id) or "")
         self._proc: Optional[subprocess.Popen] = None
         self._msg_id = 0
         self._diagnostics: dict[str, list[str]] = {}
@@ -184,7 +182,7 @@ class LSPClient:
                 "params": {
                     "textDocument": {
                         "uri": uri,
-                        "languageId": "python",
+                        "languageId": self._language_id,
                         "version": 1,
                         "text": source,
                     }

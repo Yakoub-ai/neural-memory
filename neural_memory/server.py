@@ -38,6 +38,7 @@ class QueryInput(BaseModel):
     query: str = Field(..., description="Search term — function name, class name, or keyword", min_length=1)
     project_root: str = Field(default=".", description="Project root directory path")
     limit: int = Field(default=10, description="Max results to return", ge=1, le=50)
+    language: Optional[str] = Field(default=None, description="Filter results to a specific language (e.g. 'python', 'typescript', 'rust')")
 
 
 class InspectInput(BaseModel):
@@ -203,18 +204,25 @@ async def neural_query(params: QueryInput) -> str:
     from .graph import format_node_summary
     from .storage import Storage
     with Storage(params.project_root) as storage:
-        sem_results = semantic_search(storage, params.query, limit=params.limit)
+        sem_results = semantic_search(storage, params.query, limit=params.limit * 3 if params.language else params.limit)
+
+        # Apply language filter
+        if params.language and sem_results:
+            sem_results = [r for r in sem_results if r.node.language == params.language]
+            sem_results = sem_results[:params.limit]
 
         if sem_results:
+            lang_label = f" [{params.language}]" if params.language else ""
             search_mode = "semantic"
             lines = [
-                f"# Neural Query: '{params.query}'",
+                f"# Neural Query: '{params.query}'{lang_label}",
                 f"Found {len(sem_results)} result(s) _(semantic + graph search)_:",
                 "",
             ]
             for i, r in enumerate(sem_results, 1):
                 node = r.node
-                lines.append(f"{i}. {format_node_summary(node, 'short')}")
+                lang_tag = f" `{node.language}`" if node.language else ""
+                lines.append(f"{i}. {format_node_summary(node, 'short')}{lang_tag}")
                 lines.append(
                     f"   ID: `{node.id}` | File: {node.file_path}:{node.line_start}"
                     f" | score: {r.score:.2f} [{r.match_type}] | {r.connections_summary}"
@@ -223,6 +231,8 @@ async def neural_query(params: QueryInput) -> str:
         else:
             # Fallback: substring LIKE search
             nodes = storage.search_nodes(params.query, limit=params.limit)
+            if params.language and nodes:
+                nodes = [n for n in nodes if n.language == params.language]
             if not nodes:
                 hint = (
                     " Run `/neural-index` to build the index."
@@ -239,7 +249,8 @@ async def neural_query(params: QueryInput) -> str:
                 "",
             ]
             for i, node in enumerate(nodes, 1):
-                lines.append(f"{i}. {format_node_summary(node, 'short')}")
+                lang_tag = f" `{node.language}`" if node.language else ""
+                lines.append(f"{i}. {format_node_summary(node, 'short')}{lang_tag}")
                 lines.append(f"   ID: `{node.id}` | File: {node.file_path}:{node.line_start}")
                 lines.append("")
 
@@ -306,8 +317,10 @@ async def neural_inspect(params: InspectInput) -> str:
 
         # Optionally include source
         if params.show_code and node.raw_code:
-            lang = node.language or "python"
-            output += f"\n\n## Source Code\n```{lang}\n{node.raw_code}\n```"
+            from .languages import detect_language
+            lang = detect_language(node.file_path)
+            fence = (lang.code_fence if lang else None) or node.language or "text"
+            output += f"\n\n## Source Code\n```{fence}\n{node.raw_code}\n```"
 
     return output
 

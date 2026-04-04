@@ -19,6 +19,19 @@ class NodeType(str, Enum):
     EXPORT = "export"
     TYPE_DEF = "type_def"
     OTHER = "other"
+    # ── Multi-language constructs ──
+    INTERFACE = "interface"          # TS/Go/PHP interfaces
+    TRAIT = "trait"                  # Rust traits
+    STRUCT = "struct"               # Rust/Go structs
+    ENUM = "enum"                   # Rust/TS/Ruby enums
+    TYPE_ALIAS = "type_alias"       # TS type aliases, Rust type aliases
+    CONSTANT = "constant"           # Module-level constants
+    # ── Database / SQL schema ──
+    DATABASE = "database"
+    TABLE = "table"
+    COLUMN = "column"
+    VIEW = "view"
+    STORED_PROCEDURE = "stored_procedure"
     # ── Codebase (generated overviews) ──
     PROJECT_OVERVIEW = "project_overview"
     DIRECTORY_OVERVIEW = "directory_overview"
@@ -28,10 +41,6 @@ class NodeType(str, Enum):
     PHASE = "phase"
     TASK = "task"
     SUBTASK = "subtask"
-    # ── Database schema ──
-    DATABASE = "database"
-    TABLE = "table"
-    COLUMN = "column"
 
 
 class EdgeType(str, Enum):
@@ -39,6 +48,7 @@ class EdgeType(str, Enum):
     CALLS = "calls"
     IMPORTS = "imports"
     INHERITS = "inherits"
+    IMPLEMENTS = "implements"       # Rust impl, TS/Java implements
     DEFINES = "defines"
     USES = "uses"
     CONTAINS = "contains"
@@ -90,6 +100,8 @@ class NeuralNode:
     decorators: list[str] = field(default_factory=list)
     # Content hash for change detection
     content_hash: str = ""
+    # Language identifier (populated by multi-language parser)
+    language: str = ""             # "python", "typescript", "rust", etc.
     # Raw code (stored but not surfaced unless requested)
     raw_code: str = ""
     # Redacted flag
@@ -186,7 +198,7 @@ class EmbeddingMeta:
     idf: list[float]            # per-token IDF weights (len == len(vocab))
     svd_components: list[list[float]]  # shape [n_components, vocab_size]
     n_components: int           # content vector dimensions (e.g. 100)
-    model_version: str = "tfidf-svd-v1"
+    model_version: str = "tfidf-svd-v2"
     total_nodes: int = 0        # node count when this was last fit
 
     def to_dict(self) -> dict:

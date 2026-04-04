@@ -371,6 +371,8 @@ def _html_body() -> str:
   <div id="sidebar">
     <div class="sb-head">Category</div>
     <div id="cat-filters"></div>
+    <div class="sb-head">Language</div>
+    <div id="lang-filters"></div>
     <div class="sb-head">Node Type</div>
     <select id="type-filter" multiple size="5"></select>
     <div class="sb-head">Importance</div>
@@ -509,6 +511,7 @@ function startApp() {
     tab: 'hierarchy',
     cats: { codebase: true, bugs: true, tasks: true },
     types: {},
+    languages: {},
     minImp: 0,
     statuses: { open: true, fixed: true, pending: true, in_progress: true, done: true, '': true },
     search: '',
@@ -525,6 +528,8 @@ function startApp() {
       if (!state.cats[n.category]) return false;
       var typeKeys = Object.keys(state.types);
       if (typeKeys.length > 0 && !state.types[n.node_type]) return false;
+      var langKeys = Object.keys(state.languages);
+      if (langKeys.length > 0 && n.language && !state.languages[n.language]) return false;
       if (n.importance < state.minImp) return false;
       var st = n.bug_status || n.task_status || '';
       if (!state.statuses[st]) return false;
@@ -1262,6 +1267,32 @@ function startApp() {
       }
       redraw();
     });
+
+    // Language filter checkboxes
+    var langDiv = document.getElementById('lang-filters');
+    var allLangs = [];
+    var seenLangs = {};
+    RAW.nodes.forEach(function(n) {
+      if (n.language && !seenLangs[n.language]) { seenLangs[n.language] = 1; allLangs.push(n.language); }
+    });
+    allLangs.sort();
+    if (allLangs.length > 1) {
+      allLangs.forEach(function(lang) {
+        var cb = mk('input', { type: 'checkbox', id: 'lang-' + lang });
+        cb.checked = true;
+        cb.addEventListener('change', function() {
+          if (cb.checked) { delete state.languages[lang]; }
+          else { state.languages[lang] = false; }
+          redraw();
+        });
+        langDiv.appendChild(mk('div', { class: 'filter-row' }, [
+          cb,
+          mk('label', { 'for': 'lang-' + lang }, [lang])
+        ]));
+      });
+    } else {
+      langDiv.appendChild(mk('div', { style: 'color:#888;font-size:11px;padding:2px 0' }, [(langs[0] || 'Single language') + ' only — index more languages to filter']));
+    }
 
     // Importance slider
     var impSlider = document.getElementById('imp-slider');
