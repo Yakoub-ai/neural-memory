@@ -182,8 +182,6 @@ def _build_virtual_tree(nodes: list[dict], edges: list[dict], max_depth: int = 6
         ("writes_to",      "out", "writes to"),
         ("writes_to",      "in",  "written by"),
     ]
-    MAX_PER_GROUP = 20  # cap children per group; JS shows "+N more" for the rest
-
     def _make_node_entry(nid: str) -> dict:
         n = node_by_id.get(nid, {})
         return {
@@ -220,24 +218,29 @@ def _build_virtual_tree(nodes: list[dict], edges: list[dict], max_depth: int = 6
             else:
                 targets = incoming.get(nid, {}).get(etype, [])
 
-            # Remove already-visited nodes to prevent cycle rendering
-            targets = [t for t in targets if t not in visited_next and t in node_by_id]
-            if not targets:
+            # Separate normal targets from back-references (ancestors already in path)
+            normal_targets = [t for t in targets if t not in visited_next and t in node_by_id]
+            back_targets = [t for t in targets if t in visited_next and t in node_by_id]
+
+            if not normal_targets and not back_targets:
                 continue
 
             # Sort by importance descending so top nodes appear first
-            targets.sort(key=lambda t: node_by_id.get(t, {}).get("importance", 0.0), reverse=True)
-            truncated = max(0, len(targets) - MAX_PER_GROUP)
-            targets = targets[:MAX_PER_GROUP]
+            normal_targets.sort(key=lambda t: node_by_id.get(t, {}).get("importance", 0.0), reverse=True)
 
-            group_children = [_build_node(t, visited_next, depth + 2) for t in targets]
-            if truncated:
+            group_children = [_build_node(t, visited_next, depth + 2) for t in normal_targets]
+
+            # Append back-reference leaf nodes for ancestor connections
+            for bt in back_targets:
+                bn = node_by_id.get(bt, {})
                 group_children.append({
-                    "name": f"… +{truncated} more",
-                    "_truncated": True,
-                    "_parentId": nid,
-                    "_edgeType": etype,
-                    "_direction": direction,
+                    "id": bt,
+                    "name": bn.get("name", bt) + " \u21a9",
+                    "node_type": bn.get("node_type", "other"),
+                    "language": bn.get("language", ""),
+                    "importance": bn.get("importance", 0.0),
+                    "_backRef": True,
+                    "_refTargetId": bt,
                 })
 
             children.append({
@@ -456,8 +459,9 @@ def _html_body() -> str:
     <div id="view-vectors" class="view-panel">
       <div id="chart-vectors" class="chart-container"></div>
     </div>
-    <div id="view-graph" class="view-panel">
+    <div id="view-graph" class="view-panel" style="position:relative">
       <div id="chart-graph" class="chart-container"></div>
+      <button id="graph-back-btn" style="display:none;position:absolute;top:10px;left:10px;z-index:10;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:5px 14px;font-size:13px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background='#30363d'" onmouseout="this.style.background='#21262d'">&#8592; Back</button>
     </div>
     <div id="detail-panel">
       <button class="close-btn" id="close-detail">&#x2715;</button>
@@ -707,12 +711,10 @@ function startApp() {
       }
     });
     if (connected.length) {
-      var MAX_CONN = 25;
-      var shown = connected.slice(0, MAX_CONN);
-      var rest = connected.length - MAX_CONN;
       var connBlock = mk('div', {class:'d-field'});
       connBlock.appendChild(mk('div', {class:'d-label'}, ['Neurals to (' + connected.length + ')']));
-      shown.forEach(function(c) {
+      var connScroll = mk('div', {style:'max-height:400px;overflow-y:auto'});
+      connected.forEach(function(c) {
         var cColor = nodeColor(c.node);
         var arrow = c.dir === 'out' ? '\u2192' : '\u2190';
         var link = mk('div', {style:'cursor:pointer;padding:4px 0;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:6px'});
@@ -726,11 +728,9 @@ function startApp() {
         });
         link.addEventListener('mouseenter', function() { link.style.background = '#21262d'; });
         link.addEventListener('mouseleave', function() { link.style.background = ''; });
-        connBlock.appendChild(link);
+        connScroll.appendChild(link);
       });
-      if (rest > 0) {
-        connBlock.appendChild(mk('div', {style:'color:#8b949e;font-size:11px;margin-top:4px'}, ['+' + rest + ' more']));
-      }
+      connBlock.appendChild(connScroll);
       content.appendChild(connBlock);
     }
 
@@ -1043,6 +1043,7 @@ function startApp() {
   var _graphTreeRoot = null;        // mutable root — updated on JS-side expansion
   var _expandedIds  = {};           // {nodeId: true} — real nodes explicitly expanded
   var _graphFirstDraw = true;       // first draw uses replace mode (auto-fit)
+  var _navHistory   = [];           // [{focusId, expandedSnapshot}] for back navigation
 
   // Relationship-type → display label map (mirrors Python GROUP_ORDER)
   var GROUP_LABELS = {
@@ -1099,10 +1100,32 @@ function startApp() {
     });
   }
 
+  // Collect the set of ancestor node IDs on the path from root down to targetId.
+  function _collectAncestorIds(root, targetId) {
+    var ancestors = {};
+    function dfs(node, path) {
+      if (node._real && node.id) {
+        path.push(node.id);
+        if (node.id === targetId) {
+          path.forEach(function(id) { ancestors[id] = true; });
+          path.pop();
+          return true;
+        }
+      }
+      var ch = node.children || [];
+      for (var i = 0; i < ch.length; i++) {
+        if (dfs(ch[i], path)) { if (node._real && node.id) path.pop(); return true; }
+      }
+      if (node._real && node.id) path.pop();
+      return false;
+    }
+    dfs(root, []);
+    return ancestors;
+  }
+
   // Compute virtual children for a real node (JS-side, for on-demand expansion)
   function computeRelationshipGroups(nodeId) {
     _buildAdj();
-    var MAX = 20;
     var groups = [];
     var groupOrder = [
       ['contains','out'],['phase_contains','out'],['task_contains','out'],
@@ -1114,6 +1137,8 @@ function startApp() {
       ['writes_to','out'],['writes_to','in']
     ];
 
+    var ancestors = _graphTreeRoot ? _collectAncestorIds(_graphTreeRoot, nodeId) : {};
+
     groupOrder.forEach(function(pair) {
       var etype = pair[0], dir = pair[1];
       if (!edgeVisible[etype]) return;
@@ -1121,15 +1146,17 @@ function startApp() {
       var targets = (adj[nodeId] || {})[etype] || [];
       if (!targets.length) return;
 
+      // Partition into normal targets and back-references (ancestors)
+      var normalTargets = targets.filter(function(t) { return !ancestors[t]; });
+      var backTargets = targets.filter(function(t) { return ancestors[t] && t !== nodeId; });
+
       // Sort by importance
-      targets = targets.slice().sort(function(a, b) {
+      normalTargets = normalTargets.slice().sort(function(a, b) {
         return (NODE_MAP[b] ? NODE_MAP[b].importance : 0) - (NODE_MAP[a] ? NODE_MAP[a].importance : 0);
       });
-      var truncated = Math.max(0, targets.length - MAX);
-      targets = targets.slice(0, MAX);
 
       var label = GROUP_LABELS[etype + ':' + dir] || etype;
-      var kids = targets.map(function(tid) {
+      var kids = normalTargets.map(function(tid) {
         var n = NODE_MAP[tid];
         if (!n) return null;
         return {
@@ -1140,9 +1167,18 @@ function startApp() {
         };
       }).filter(Boolean);
 
-      if (truncated) {
-        kids.push({ name: '\u2026 +' + truncated + ' more', _truncated: true });
-      }
+      // Append back-reference leaf nodes for ancestor connections
+      backTargets.forEach(function(tid) {
+        var n = NODE_MAP[tid];
+        if (!n) return;
+        kids.push({
+          id: tid, name: n.name + ' \u21a9',
+          node_type: n.node_type, language: n.language || '',
+          importance: n.importance || 0,
+          _backRef: true, _refTargetId: tid
+        });
+      });
+
       if (kids.length) {
         groups.push({ name: '[' + label + ']', _virtual: true,
                       _edgeType: etype, _direction: dir, children: kids });
@@ -1211,9 +1247,15 @@ function startApp() {
       out.label = { color: '#e6edf3', fontSize: 12, distance: 7,
                     fontWeight: imp > 0.6 ? 'bold' : 'normal',
                     overflow: 'truncate' };
-    } else if (node._truncated) {
-      out.symbol = 'none';
-      out.label = { color: '#444d56', fontSize: 10, fontStyle: 'italic' };
+    } else if (node._backRef) {
+      var refColor = nodeColor(node);
+      out.symbol = 'triangle';
+      out.symbolSize = 10;
+      out.collapsed = true;
+      out.itemStyle = { color: refColor + '30', borderColor: refColor,
+                        borderWidth: 1, borderType: 'dashed' };
+      out.lineStyle = { color: refColor, width: 1, type: 'dotted', opacity: 0.4 };
+      out.label = { color: refColor, fontSize: 10, fontStyle: 'italic', distance: 5 };
     }
 
     if (node.children) {
@@ -1224,6 +1266,32 @@ function startApp() {
       out.children = filteredKids.map(styleTreeNode);
     }
     return out;
+  }
+
+  // Pan the chart so the node with nodeId is centered in the viewport.
+  // Runs after a short delay to let ECharts finish its layout animation.
+  function _centerOnNode(chart, nodeId, delay) {
+    setTimeout(function() {
+      try {
+        var model = chart.getModel();
+        var series = model.getSeriesByIndex(0);
+        if (!series) return;
+        var data = series.getData();
+        var idx = -1;
+        data.each(function(i) {
+          var raw = data.getRawDataItem(i);
+          if (raw && raw.id === nodeId) idx = i;
+        });
+        if (idx < 0) return;
+        var layout = data.getItemLayout(idx);
+        if (!layout) return;
+        var pixel = chart.convertToPixel({ seriesIndex: 0 }, [layout.x, layout.y]);
+        if (!pixel) return;
+        var cx = chart.getWidth() / 2;
+        var cy = chart.getHeight() / 2;
+        chart.dispatchAction({ type: 'roam', seriesIndex: 0, dx: cx - pixel[0], dy: cy - pixel[1] });
+      } catch(e) { /* ECharts internal API may vary; silently skip */ }
+    }, delay !== undefined ? delay : 120);
   }
 
   // Rebuild chart option and call setOption.
@@ -1243,7 +1311,7 @@ function startApp() {
             return '<span style="color:#8b949e;font-size:11px">'
               + (d.name || '') + ' &nbsp;<em>(' + cnt + ')</em></span>';
           }
-          if (d._truncated) return '<span style="color:#444d56">' + (d.name||'') + '</span>';
+          if (d._backRef) return '<span style="color:#8b949e;font-style:italic">\u21a9 ' + (d.name||'') + '</span>';
           var n = NODE_MAP[d.id];
           return n ? tipHtml(n) : (d.name || '');
         }
@@ -1272,6 +1340,11 @@ function startApp() {
     }, !!replace);
   }
 
+  function _updateBackBtn() {
+    var btn = document.getElementById('graph-back-btn');
+    if (btn) btn.style.display = _navHistory.length ? 'block' : 'none';
+  }
+
   function drawGraph() {
     var chart = getChart('graph');
     if (!chart) return;
@@ -1281,8 +1354,10 @@ function startApp() {
     if (!_graphTreeRoot) {
       _graphTreeRoot = JSON.parse(JSON.stringify(RAW.virtual_tree));
       _expandedIds = {};
+      _navHistory = [];
       _initExpandedState(_graphTreeRoot, (state.graphDepth || 3) - 1);
       _graphFirstDraw = true;
+      _updateBackBtn();
     }
 
     _applyGraphOption(chart, _graphFirstDraw);
@@ -1291,11 +1366,17 @@ function startApp() {
     chart.off('click');
     chart.on('click', function(params) {
       var d = params.data;
-      if (!d || d._truncated) return;
+      if (!d) return;
 
-      // Virtual group click: toggle its own collapse — find real parent via ECharts event
-      // (virtual groups open/close are handled by their collapsed:false in styleTreeNode;
-      //  clicking them does nothing extra — real parent controls visibility)
+      // Back-reference node clicked — show ancestor detail and center on it
+      if (d._backRef) {
+        var refNode = NODE_MAP[d._refTargetId];
+        if (refNode) showDetail(refNode);
+        _centerOnNode(chart, d._refTargetId);
+        return;
+      }
+
+      // Virtual group click: no action — real parent controls visibility
       if (d._virtual) return;
 
       // Real node clicked — show detail panel
@@ -1310,6 +1391,10 @@ function startApp() {
 
       if (!wasExpanded) {
         // ── EXPAND ──────────────────────────────────────────────────────────
+        // Push current state onto navigation history before expanding
+        _navHistory.push({ focusId: d.id, expandedSnapshot: JSON.parse(JSON.stringify(_expandedIds)) });
+        _updateBackBtn();
+
         _expandedIds[d.id] = true;
 
         // Add relationship groups on-demand if not yet computed
@@ -1320,25 +1405,37 @@ function startApp() {
           addedNew = true;
         }
 
-        // Virtual group children: styleTreeNode already sets collapsed:false so
-        // they open automatically — no extra work needed here.
-
         if (!treeNode.children || !treeNode.children.length) {
-          // True leaf: no children at all — skip redraw, just show detail panel
+          // True leaf: no children — skip redraw, just show detail panel
+          _navHistory.pop(); // undo nav push since no expansion happened
+          _updateBackBtn();
           return;
         }
 
-        // Redraw: replace mode if we added brand-new nodes (auto-fits viewport),
-        // merge mode if toggling pre-existing subtree (preserves user zoom)
-        _applyGraphOption(chart, addedNew);
+        // Redraw: merge mode to preserve zoom/pan, then center on the clicked node
+        _applyGraphOption(chart, false);
+        _centerOnNode(chart, d.id);
 
       } else {
         // ── COLLAPSE ────────────────────────────────────────────────────────
         delete _expandedIds[d.id];
-        // Merge mode: preserve zoom, just collapse this subtree
         _applyGraphOption(chart, false);
       }
     });
+
+    // Wire back button (safe to re-wire on each drawGraph call)
+    var backBtn = document.getElementById('graph-back-btn');
+    if (backBtn && !backBtn._wired) {
+      backBtn._wired = true;
+      backBtn.addEventListener('click', function() {
+        if (!_navHistory.length) return;
+        var prev = _navHistory.pop();
+        _expandedIds = prev.expandedSnapshot;
+        _updateBackBtn();
+        _applyGraphOption(chart, false);
+        _centerOnNode(chart, prev.focusId, 200);
+      });
+    }
   }
 
   // ── Graph sidebar controls ─────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 [project]
 name = "neural-memory-mcp"
-version = "0.7.4"
+version = "0.8.0"
 description = "A neural knowledge graph for codebases — three-layer code/bugs/tasks understanding for Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
