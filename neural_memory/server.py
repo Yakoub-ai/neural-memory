@@ -66,24 +66,6 @@ class ConfigInput(BaseModel):
     value: Optional[str] = Field(default=None, description="Value for the action")
 
 
-class VisualizeInput(BaseModel):
-    """Input for visualization generation."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    project_root: str = Field(default=".", description="Project root directory path")
-    mode: str = Field(
-        default="both",
-        description="Which visualization to generate: 'hierarchy', 'vectors', or 'both'",
-    )
-    dimensions: int = Field(
-        default=2,
-        description="Dimensions for vector space view: 2 or 3",
-        ge=2, le=3,
-    )
-    color_by: str = Field(
-        default="node_type",
-        description="Color grouping for vector view: 'node_type' or 'file'",
-    )
-
 
 class ContextInput(BaseModel):
     """Input for the compact context tool."""
@@ -100,12 +82,6 @@ class ArchiveInput(BaseModel):
     action: str = Field(default="archive", description="Action: 'archive' or 'unarchive'")
     project_root: str = Field(default=".", description="Project root directory path")
 
-
-class SaveContextInput(BaseModel):
-    """Input for saving session context snapshot."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    project_root: str = Field(default=".", description="Project root directory path")
-    token_budget: int = Field(default=800, description="Approximate token budget (100–3000)", ge=100, le=3000)
 
 
 class ListTasksInput(BaseModel):
@@ -125,6 +101,19 @@ class UpdateTaskInput(BaseModel):
     priority: Optional[str] = Field(default=None, description="New priority: low / medium / high")
     related_files: list[str] = Field(default_factory=list, description="Additional file paths to link to this task")
     project_root: str = Field(default=".", description="Project root directory path")
+
+
+def _parse_filter(key: str, query: str) -> tuple[Optional[str], str]:
+    """Extract a `key:value` structured filter token from a query string.
+
+    Returns (value, remainder_query). If the key is not present, returns (None, query).
+    Example: _parse_filter("type", "type:class auth") -> ("class", "auth")
+    """
+    import re
+    m = re.search(rf'\b{key}:(\S+)', query)
+    if m:
+        return m.group(1).lower(), (query[:m.start()] + query[m.end():]).strip()
+    return None, query
 
 
 # ── Tools ──
@@ -254,75 +243,140 @@ async def neural_update(params: UpdateInput) -> str:
 async def neural_query(params: QueryInput) -> str:
     """Search the neural memory graph for functions, classes, modules, or concepts.
 
-    Uses semantic vector search (if embeddings are built) for concept-level
-    matching, with graph-guided branch expansion to surface connected nodes.
-    Falls back to substring search if embeddings are unavailable.
+    Supports structured filters in the query string:
+      type:function    — filter by node type (function, class, method, module, etc.)
+      file:storage     — filter to files containing this substring
+      layer:bugs       — filter to a specific layer (codebase, bugs, tasks, insights)
+      edge:calls       — filter to nodes with a specific edge type
 
-    Returns layered summaries — short overview first, with the ability to
-    dig deeper using neural_inspect on any result.
+    Examples:
+      "auth"                  — semantic search for anything auth-related
+      "type:class auth"       — auth-related classes only
+      "file:storage"          — all nodes in storage-related files
+      "layer:bugs"            — all tracked bugs
+      "edge:calls storage"    — nodes that call storage-related things
+
+    Every response includes a freshness stamp — if indexed files have changed on disk
+    since the last index, the stale files are listed so you know the data may be outdated.
     """
     from .embeddings import semantic_search
     from .graph import format_node_summary
     from .storage import Storage
+
+    # Parse structured filters from query
+    raw_query = params.query
+    filter_type, raw_query = _parse_filter("type", raw_query)
+    filter_file, raw_query = _parse_filter("file", raw_query)
+    filter_layer, raw_query = _parse_filter("layer", raw_query)
+    filter_edge, raw_query = _parse_filter("edge", raw_query)
+
+    # Use cleaned query for search (or full query if no filters extracted)
+    search_query = raw_query.strip() or params.query
+
     with Storage(params.project_root) as storage:
-        sem_results = semantic_search(storage, params.query, limit=params.limit * 3 if params.language else params.limit)
+        # Run semantic search (or FTS fallback)
+        fetch_limit = params.limit * 4  # over-fetch to allow for filter narrowing
+        sem_results = semantic_search(storage, search_query, limit=fetch_limit)
 
-        # Apply language filter
-        if params.language and sem_results:
-            sem_results = [r for r in sem_results if r.node.language == params.language]
-            sem_results = sem_results[:params.limit]
-
-        # Filter out archived items unless explicitly requested
-        if not params.include_archived and sem_results:
-            sem_results = [r for r in sem_results if not r.node.archived]
-
+        # Get result nodes (either from semantic search or FTS/LIKE fallback)
+        result_nodes_with_scores = []
         if sem_results:
-            lang_label = f" [{params.language}]" if params.language else ""
-            search_mode = "semantic"
-            lines = [
-                f"# Neural Query: '{params.query}'{lang_label}",
-                f"Found {len(sem_results)} result(s) _(semantic + graph search)_:",
-                "",
-            ]
-            for i, r in enumerate(sem_results, 1):
-                node = r.node
-                lang_tag = f" `{node.language}`" if node.language else ""
-                lines.append(f"{i}. {format_node_summary(node, 'short')}{lang_tag}")
-                lines.append(
-                    f"   ID: `{node.id}` | File: {node.file_path}:{node.line_start}"
-                    f" | score: {r.score:.2f} [{r.match_type}] | {r.connections_summary}"
-                )
-                lines.append("")
+            result_nodes_with_scores = [(r.node, r.score, r.match_type, getattr(r, "connections_summary", "")) for r in sem_results]
         else:
-            # Fallback: substring LIKE search
-            nodes = storage.search_nodes(params.query, limit=params.limit)
-            if params.language and nodes:
-                nodes = [n for n in nodes if n.language == params.language]
-            if not params.include_archived and nodes:
-                nodes = [n for n in nodes if not n.archived]
-            if not nodes:
-                hint = (
-                    " Run `/neural-index` to build the index."
-                    if not storage.get_embedding_meta()
-                    else ""
-                )
-                return (
-                    f"No results found for '{params.query}'.{hint}"
-                )
-            search_mode = "substring"
-            lines = [
-                f"# Neural Query: '{params.query}'",
-                f"Found {len(nodes)} result(s) _(substring search — run `/neural-index` with vectors extra for semantic search)_:",
-                "",
-            ]
-            for i, node in enumerate(nodes, 1):
-                lang_tag = f" `{node.language}`" if node.language else ""
-                lines.append(f"{i}. {format_node_summary(node, 'short')}{lang_tag}")
-                lines.append(f"   ID: `{node.id}` | File: {node.file_path}:{node.line_start}")
-                lines.append("")
+            fallback_nodes = storage.search_nodes(search_query, limit=fetch_limit)
+            result_nodes_with_scores = [(n, 0.0, "substring", "") for n in fallback_nodes]
 
-    lines.append("---")
-    lines.append("Use `neural_inspect` with a node ID or name to see full details, connections, and source code.")
+        # Apply structured filters
+        if filter_type:
+            result_nodes_with_scores = [
+                t for t in result_nodes_with_scores
+                if t[0].node_type.value == filter_type
+            ]
+        if filter_file:
+            result_nodes_with_scores = [
+                t for t in result_nodes_with_scores
+                if filter_file in t[0].file_path
+            ]
+        if filter_layer:
+            result_nodes_with_scores = [
+                t for t in result_nodes_with_scores
+                if t[0].category == filter_layer
+            ]
+        if filter_edge:
+            # Filter to nodes that have at least one edge of this type
+            edge_filtered = []
+            for t in result_nodes_with_scores:
+                node = t[0]
+                out_edges = storage.get_edges_from(node.id)
+                in_edges = storage.get_edges_to(node.id)
+                all_types = {e.edge_type.value for e in out_edges + in_edges}
+                if filter_edge in all_types:
+                    edge_filtered.append(t)
+            result_nodes_with_scores = edge_filtered
+
+        # Apply language + archive filters
+        if params.language:
+            result_nodes_with_scores = [
+                t for t in result_nodes_with_scores if t[0].language == params.language
+            ]
+        if not params.include_archived:
+            result_nodes_with_scores = [
+                t for t in result_nodes_with_scores if not t[0].archived
+            ]
+
+        result_nodes_with_scores = result_nodes_with_scores[:params.limit]
+
+        if not result_nodes_with_scores:
+            hint = (
+                " Run `/neural-index` to build the index."
+                if not storage.get_embedding_meta()
+                else ""
+            )
+            active_filters = [f"{k}:{v}" for k, v in [
+                ("type", filter_type), ("file", filter_file),
+                ("layer", filter_layer), ("edge", filter_edge)
+            ] if v]
+            filter_note = f" (filters: {', '.join(active_filters)})" if active_filters else ""
+            return f"No results found for '{params.query}'{filter_note}.{hint}"
+
+        # Freshness check: verify result files haven't changed since indexing
+        unique_files = list({t[0].file_path for t in result_nodes_with_scores if t[0].file_path})
+        freshness = storage.check_file_freshness(unique_files, params.project_root)
+        stale_files = [fp for fp, status in freshness.items() if status == "stale"]
+        deleted_files = [fp for fp, status in freshness.items() if status == "deleted"]
+
+        # Build output
+        used_semantic = bool(sem_results)
+        lang_label = f" [{params.language}]" if params.language else ""
+        search_mode_label = "semantic + graph" if used_semantic else "BM25 text"
+        lines = [
+            f"# Neural Query: '{params.query}'{lang_label}",
+            f"Found {len(result_nodes_with_scores)} result(s) _({search_mode_label} search)_:",
+            "",
+        ]
+
+        for i, (node, score, match_type, conn_summary) in enumerate(result_nodes_with_scores, 1):
+            lang_tag = f" `{node.language}`" if node.language else ""
+            staleness_tag = " ⚠️stale" if node.file_path in stale_files else ""
+            lines.append(f"{i}. {format_node_summary(node, 'short')}{lang_tag}{staleness_tag}")
+            score_str = f" | score: {score:.2f} [{match_type}]" if score > 0 else ""
+            conn_str = f" | {conn_summary}" if conn_summary else ""
+            lines.append(f"   ID: `{node.id}` | File: `{node.file_path}:{node.line_start}`{score_str}{conn_str}")
+            lines.append("")
+
+        lines.append("---")
+
+        # Freshness footer
+        if stale_files or deleted_files:
+            stale_list = ", ".join(f"`{f}`" for f in (stale_files + deleted_files)[:5])
+            lines.append(
+                f"⚠️ **Freshness warning**: {len(stale_files + deleted_files)} file(s) changed since last index: {stale_list}. "
+                f"Run `neural_update` for fresh data."
+            )
+        else:
+            lines.append("✓ All result files verified fresh.")
+
+        lines.append("Use `neural_inspect` with a node ID or name for full details and call chains.")
 
     return "\n".join(lines)
 
@@ -342,13 +396,17 @@ async def neural_inspect(params: InspectInput) -> str:
     who calls it, what it calls, sibling functions, parent module/class,
     and optionally the raw source code.
 
+    Automatically refreshes the target file if it has changed on disk since
+    the last index, so inspect always returns current data for the specific file.
+
     This is the "one step deeper" in the neural graph.
     """
     from .graph import get_neighborhood, format_neighborhood, trace_call_chain
     from .storage import Storage
+
+    # First pass: locate the node
     with Storage(params.project_root) as storage:
         node = None
-
         if params.node_id:
             node = storage.get_node(params.node_id)
         elif params.node_name:
@@ -356,11 +414,43 @@ async def neural_inspect(params: InspectInput) -> str:
             node = results[0] if results else None
 
         if not node:
-            return f"Node not found. Use `neural_query` to search first."
+            return "Node not found. Use `neural_query` to search first."
 
-        # Get neighborhood
+        # Check if the file has changed — if so, micro-update it before inspecting
+        if node.file_path and not node.file_path.startswith("__"):
+            freshness = storage.check_file_freshness([node.file_path], params.project_root)
+            file_status = freshness.get(node.file_path, "fresh")
+        else:
+            file_status = "fresh"
+
+    freshness_note = ""
+    if file_status == "stale":
+        # Micro-update the single file so we return fresh AST data
+        from .indexer import micro_update
+        mu_stats = micro_update(node.file_path, params.project_root)
+        if mu_stats.get("error"):
+            freshness_note = f"\n> ⚠️ File changed but refresh failed: {mu_stats['error']}\n"
+        else:
+            freshness_note = f"\n> ✓ File changed — auto-refreshed ({mu_stats['nodes_updated']} nodes updated)\n"
+    elif file_status == "deleted":
+        freshness_note = "\n> ⚠️ Source file has been deleted — showing last-indexed data\n"
+
+    # Second pass: read the (potentially refreshed) node
+    with Storage(params.project_root) as storage:
+        if params.node_id:
+            node = storage.get_node(params.node_id)
+        elif params.node_name:
+            results = storage.search_nodes(params.node_name, limit=1)
+            node = results[0] if results else None
+
+        if not node:
+            return "Node not found after refresh. The file may have been restructured."
+
         neighborhood = get_neighborhood(storage, node.id)
         output = format_neighborhood(neighborhood)
+
+        if freshness_note:
+            output = freshness_note + output
 
         # Optionally trace calls
         if params.trace_calls:
@@ -390,6 +480,61 @@ async def neural_inspect(params: InspectInput) -> str:
             output += f"\n\n## Source Code\n```{fence}\n{node.raw_code}\n```"
 
     return output
+
+
+class ImpactInput(BaseModel):
+    """Input for impact analysis."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    node_name: Optional[str] = Field(default=None, description="Function or class name to analyze")
+    node_id: Optional[str] = Field(default=None, description="Node ID to analyze (from query results)")
+    project_root: str = Field(default=".", description="Project root directory path")
+    max_depth: int = Field(default=3, description="Maximum transitive depth to trace (1-5)", ge=1, le=5)
+
+
+@mcp.tool(
+    name="neural_impact",
+    annotations={
+        "title": "Neural Memory — Impact Analysis",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def neural_impact(params: ImpactInput) -> str:
+    """Analyze the blast radius of changing a function or class.
+
+    Answers: "If I change this, what else might break?"
+
+    Traces all transitive callers, inheritors, and implementors up to max_depth hops.
+    Results are grouped by file so you know exactly which files need review/testing.
+
+    This is something Claude cannot efficiently do natively — it would require reading
+    dozens of files. The pre-built graph makes this a single sub-second call.
+
+    Examples:
+      neural_impact(node_name="Storage")       — what depends on Storage class?
+      neural_impact(node_name="incremental_update", max_depth=2)
+    """
+    from .graph import get_impact_radius, format_impact_report
+    from .storage import Storage
+
+    with Storage(params.project_root) as storage:
+        node = None
+        if params.node_id:
+            node = storage.get_node(params.node_id)
+        elif params.node_name:
+            results = storage.search_nodes(params.node_name, limit=1)
+            node = results[0] if results else None
+
+        if not node:
+            return (
+                f"Node '{params.node_name or params.node_id}' not found. "
+                "Use `neural_query` to find the correct name first."
+            )
+
+        impact = get_impact_radius(storage, node.id, max_depth=params.max_depth)
+        return format_impact_report(impact)
 
 
 @mcp.tool(
@@ -477,219 +622,12 @@ async def neural_config(params: ConfigInput) -> str:
         return "Unknown action or missing value. Actions: view, set_mode, add_exclude, add_redaction_pattern, set_staleness_threshold"
 
 
-@mcp.tool(
-    name="neural_visualize",
-    annotations={
-        "title": "Neural Memory — Visualize",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-async def neural_visualize(params: VisualizeInput) -> str:
-    """Generate interactive HTML visualizations of the neural memory graph.
-
-    Two views available:
-    - hierarchy: treemap of module→class→function containment, sized by importance
-    - vectors: PCA scatter of composite embeddings — semantic similarity clusters
-
-    Output files are written to .neural-memory/ and can be opened in any browser.
-    Requires: pip install neural-memory[viz]
-    """
-    from .config import get_memory_dir
-    from .storage import Storage
-    from .visualize import generate_hierarchy_html, generate_vector_space_html
-    memory_dir = get_memory_dir(params.project_root)
-    outputs = []
-
-    with Storage(params.project_root) as storage:
-        if params.mode in ("hierarchy", "both"):
-            out_path = str(memory_dir / "viz_hierarchy.html")
-            result = generate_hierarchy_html(storage, out_path)
-            outputs.append(f"**Hierarchy view**: {result}")
-
-        if params.mode in ("vectors", "both"):
-            out_path = str(memory_dir / "viz_vectors.html")
-            result = generate_vector_space_html(
-                storage, out_path,
-                dimensions=params.dimensions,
-                color_by=params.color_by,
-            )
-            outputs.append(f"**Vector space view** ({params.dimensions}D): {result}")
-
-    if not outputs:
-        return "Invalid mode. Use: hierarchy, vectors, or both"
-
-    lines = ["# Neural Memory — Visualization Generated", ""]
-    lines.extend(outputs)
-    lines.append("")
-    lines.append("Open the HTML files in your browser for interactive exploration.")
-    return "\n".join(lines)
-
-
-class DashboardInput(BaseModel):
-    """Input for the interactive dashboard tool."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    project_root: str = Field(default=".", description="Project root directory")
-    output_path: Optional[str] = Field(
-        default=None,
-        description="Output HTML file path. Defaults to .neural-memory/dashboard.html",
-    )
-
-
-@mcp.tool(
-    name="neural_visualize_dashboard",
-    annotations={
-        "title": "Neural Memory — Interactive Dashboard",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-async def neural_visualize_dashboard(params: DashboardInput) -> str:
-    """Generate the interactive D3 knowledge-graph dashboard.
-
-    Produces a single self-contained HTML file with:
-    - Hierarchy treemap (module → class → function, sized by importance)
-    - Vector space scatter (PCA-projected embeddings, nodes clustered by semantics)
-    - Force-directed graph (nodes + edges, drag/zoom/pan)
-    - Sidebar filters: category (codebase/bugs/tasks), node type, importance, status, search
-    - Click any node to inspect its full detail panel
-
-    Output is written to .neural-memory/dashboard.html (or the path you specify).
-    Open the file in any browser — no server required.
-    """
-    from .config import get_memory_dir
-    from .dashboard import generate_dashboard_html
-    from .storage import Storage
-    memory_dir = get_memory_dir(params.project_root)
-    out_path = params.output_path or str(memory_dir / "dashboard.html")
-
-    with Storage(params.project_root) as storage:
-        generate_dashboard_html(
-            storage,
-            output_path=out_path,
-            project_root=params.project_root,
-        )
-
-    return (
-        "# Neural Memory — Dashboard Generated\n\n"
-        f"**File**: `{out_path}`\n\n"
-        "Open in your browser for the interactive 3-tab knowledge graph view.\n\n"
-        "**Views**: Hierarchy treemap | Vector space | Force graph\n"
-        "**Filters**: Category · Node type · Importance · Status · Search"
-    )
-
-
-class ServeInput(BaseModel):
-    """Input for neural_serve."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    project_root: str = Field(default=".", description="Project root directory")
-    port: int = Field(default=7891, description="Port to listen on (default: 7891)")
-    open_browser: bool = Field(default=True, description="Open dashboard in browser automatically")
-    regenerate: bool = Field(default=True, description="Regenerate dashboard HTML before serving")
-
-
-@mcp.tool(
-    name="neural_serve",
-    annotations={
-        "title": "Neural Memory — Start Dashboard Server",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-async def neural_serve(params: ServeInput) -> str:
-    """Start a local HTTP server and open the neural memory dashboard in your browser.
-
-    Regenerates the dashboard HTML from the current index, then serves it at
-    http://localhost:PORT/dashboard.html and opens the URL in the default browser.
-
-    Idempotent: calling again while the server is already running on the same port
-    just re-opens the browser tab. Call neural_stop_serve to shut it down.
-    """
-    from .config import get_memory_dir
-    from .dashboard import generate_dashboard_html
-    from .serve import start_server, is_running, get_url
-    from .storage import Storage
-
-    memory_dir = get_memory_dir(params.project_root)
-    out_path = str(memory_dir / "dashboard.html")
-
-    if params.regenerate:
-        with Storage(params.project_root) as storage:
-            generate_dashboard_html(
-                storage,
-                output_path=out_path,
-                project_root=params.project_root,
-            )
-
-    url = start_server(
-        project_root=params.project_root,
-        port=params.port,
-        open_browser=params.open_browser,
-    )
-
-    return (
-        "# Neural Memory Dashboard\n\n"
-        f"**URL**: <{url}>\n\n"
-        f"Serving `.neural-memory/` on port **{params.port}**.\n\n"
-        "The dashboard opens automatically in your default browser.\n\n"
-        "**Views**: Hierarchy treemap · Semantic radial tree · Force-directed graph\n"
-        "**Filters**: Category · Node type · Importance · Status · Search\n\n"
-        "Run `neural_stop_serve` to shut down the server."
-    )
-
-
-class StopServeInput(BaseModel):
-    """Input for neural_stop_serve (no required fields)."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-
-
-@mcp.tool(
-    name="neural_stop_serve",
-    annotations={
-        "title": "Neural Memory — Stop Dashboard Server",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-async def neural_stop_serve(params: StopServeInput) -> str:
-    """Stop the running neural memory dashboard HTTP server."""
-    from .serve import stop_server, is_running, get_url
-
-    url = get_url()
-    stopped = stop_server()
-
-    if stopped:
-        return f"Dashboard server stopped (was running at {url})."
-    return "No dashboard server is currently running."
-
-
 class AddInsightInput(BaseModel):
     """Input for saving a technical insight into the knowledge graph."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     content: str = Field(..., description="The insight text — educational point about implementation choices, patterns, or architecture", min_length=10)
     topic: str = Field(..., description="Topic area, e.g. 'authentication', 'database', 'hooks', 'caching', 'storage'", min_length=2)
     related_files: list[str] = Field(default_factory=list, description="File paths this insight relates to (creates RELATES_TO edges to code nodes)")
-    project_root: str = Field(default=".", description="Project root directory path")
-
-
-class ListInsightsInput(BaseModel):
-    """Input for listing accumulated insights."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    topic: Optional[str] = Field(default=None, description="Filter by topic (e.g. 'authentication'). Omit to list all insights.")
-    project_root: str = Field(default=".", description="Project root directory path")
-
-
-class GenerateDocsInput(BaseModel):
-    """Input for generating technical documentation from all accumulated insights."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     project_root: str = Field(default=".", description="Project root directory path")
 
 
@@ -920,7 +858,8 @@ async def neural_add_insight(params: AddInsightInput) -> str:
     over time and can be synthesized into full documentation via neural_generate_docs.
 
     Insights are deduplicated by topic + content — re-saving a near-identical insight
-    updates the existing one rather than creating a duplicate.
+    updates the existing one rather than creating a duplicate. Search insights with
+    `neural_query` using `layer:insights`, or browse a specific one via `neural_inspect`.
     """
     from .models import NeuralNode, NodeType, NeuralEdge, EdgeType, SummaryMode
     from .storage import Storage
@@ -972,143 +911,12 @@ async def neural_add_insight(params: AddInsightInput) -> str:
         f"**Topic**: {topic_normalized}\n"
         f"**Content**: {params.content[:120]}{'...' if len(params.content) > 120 else ''}\n"
         f"**Edges created**: {edges_created}\n\n"
-        f"Use `neural_list_insights` to browse or `neural_generate_docs` to synthesize all insights."
+        f"Use `neural_query` with `layer:insights` to browse, or `neural_inspect` with ID `{node_id}` for details."
     )
-
-
-@mcp.tool(
-    name="neural_list_insights",
-    annotations={
-        "title": "Neural Memory — List Insights",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-async def neural_list_insights(params: ListInsightsInput) -> str:
-    """List all accumulated technical insights, optionally filtered by topic.
-
-    Returns insights grouped by topic with their content summaries.
-    Use neural_generate_docs for a full documentation synthesis with code references.
-    """
-    from .storage import Storage
-    from collections import defaultdict
-
-    with Storage(params.project_root) as storage:
-        insights = storage.get_insights(topic=params.topic)
-
-    if not insights:
-        topic_msg = f" for topic '{params.topic}'" if params.topic else ""
-        return (
-            f"No insights found{topic_msg}.\n\n"
-            f"Use `neural_add_insight` to start building the insight bank."
-        )
-
-    by_topic: dict[str, list] = defaultdict(list)
-    for node in insights:
-        topic = node.name.split("/", 1)[1].split(":", 1)[0].strip() if "/" in node.name else "general"
-        by_topic[topic].append(node)
-
-    lines = [f"# Insights ({len(insights)} total)\n"]
-    for topic in sorted(by_topic.keys()):
-        nodes = by_topic[topic]
-        lines.append(f"## {topic.title()} ({len(nodes)})\n")
-        for n in nodes:
-            lines.append(f"- `{n.id}` — {n.summary_short}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-@mcp.tool(
-    name="neural_generate_docs",
-    annotations={
-        "title": "Neural Memory — Generate Technical Docs",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-async def neural_generate_docs(params: GenerateDocsInput) -> str:
-    """Generate comprehensive technical documentation from all accumulated insights.
-
-    Gathers all insight nodes, groups them by topic, follows RELATES_TO edges to
-    include code references, and produces structured markdown documentation.
-    Also writes the output to .neural-memory/technical-docs.md for persistence.
-    """
-    from .storage import Storage
-    from .models import EdgeType
-    from collections import defaultdict
-
-    with Storage(params.project_root) as storage:
-        insights = storage.get_insights()
-
-        if not insights:
-            return (
-                "# Technical Documentation\n\n"
-                "No insights have been accumulated yet.\n\n"
-                "Use `neural_add_insight` to save technical insights during development, "
-                "then run this tool again to generate documentation."
-            )
-
-        by_topic: dict[str, list] = defaultdict(list)
-        for node in insights:
-            topic = node.name.split("/", 1)[1].split(":", 1)[0].strip() if "/" in node.name else "general"
-            edges = storage.get_edges_from(node.id)
-            code_refs = []
-            for edge in edges:
-                if edge.edge_type == EdgeType.RELATES_TO:
-                    target = storage.get_node(edge.target_id)
-                    if target and target.category == "codebase":
-                        code_refs.append(f"`{target.name}` ({target.file_path}:{target.line_start})")
-            by_topic[topic].append((node, code_refs))
-
-    lines = [
-        "# Technical Documentation\n",
-        f"*Generated from {len(insights)} insight(s) across {len(by_topic)} topic(s).*\n",
-        "---\n",
-    ]
-    for topic in sorted(by_topic.keys()):
-        entries = by_topic[topic]
-        lines.append(f"## {topic.title()}\n")
-        for node, code_refs in entries:
-            lines.append(f"### {node.summary_short[:120]}\n")
-            lines.append(node.summary_detailed)
-            if code_refs:
-                lines.append(f"\n**Related code**: {', '.join(code_refs[:5])}")
-            lines.append("")
-        lines.append("---\n")
-
-    content = "\n".join(lines)
-
-    # Persist to .neural-memory/technical-docs.md
-    try:
-        from .config import get_memory_dir
-        memory_dir = get_memory_dir(params.project_root)
-        memory_dir.mkdir(parents=True, exist_ok=True)
-        doc_path = memory_dir / "technical-docs.md"
-        doc_path.write_text(content, encoding="utf-8")
-        content += f"\n\n---\n*Written to `{doc_path}`*"
-    except Exception:
-        pass
-
-    return content
 
 
 # ── Context Tool ──
 
-@mcp.tool(
-    name="neural_context",
-    annotations={
-        "title": "Neural Memory — Compact Context",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
 async def neural_context(params: ContextInput) -> str:
     """Get a token-budgeted context snapshot for the current project.
 
@@ -1132,16 +940,6 @@ async def neural_context(params: ContextInput) -> str:
 
 # ── Archive Tool ──
 
-@mcp.tool(
-    name="neural_archive",
-    annotations={
-        "title": "Neural Memory — Archive Node",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
 async def neural_archive(params: ArchiveInput) -> str:
     """Archive or unarchive a bug/task node.
 
@@ -1169,276 +967,6 @@ async def neural_archive(params: ArchiveInput) -> str:
             return f"Node `{params.node_id}` not found."
         else:
             return "Invalid action. Use: 'archive' or 'unarchive'"
-
-
-# ── DB Schema Tool ──
-
-class IndexDbInput(BaseModel):
-    """Input for live database schema indexing."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    connection_string: str = Field(
-        default="auto",
-        description="DB connection string (sqlite:///path, postgresql://..., mysql://...) or 'auto' to detect from env/config",
-    )
-    project_root: str = Field(default=".", description="Project root for auto-detection")
-    db_name: Optional[str] = Field(default=None, description="Override database name label")
-
-
-@mcp.tool(
-    name="neural_index_db",
-    annotations={
-        "title": "Neural Memory — Index Database Schema",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
-async def neural_index_db(params: IndexDbInput) -> str:
-    """Index a live database schema into the knowledge graph.
-
-    Connects to a SQLite, PostgreSQL, or MySQL database and introspects its
-    schema (tables, columns, foreign keys), storing them as DATABASE/TABLE/COLUMN
-    nodes in the knowledge graph.
-
-    Use 'auto' for connection_string to detect DATABASE_URL from environment
-    or project .env file.
-    """
-    from .db.connector import detect_connection_string, fetch_schema
-    from .db.schema_indexer import index_db_schema
-    from .storage import Storage
-
-    # Resolve connection string
-    cs = params.connection_string.strip()
-    if cs == "auto":
-        cs = detect_connection_string(params.project_root) or ""
-        if not cs:
-            return (
-                "# Neural Memory — DB Index Failed\n\n"
-                "Could not auto-detect a database connection string.\n\n"
-                "**Tried:** `DATABASE_URL` env var, `.env` file, `docker-compose.yml`\n\n"
-                "Please provide an explicit `connection_string` parameter."
-            )
-
-    # Derive db_name from connection string if not provided
-    db_name = params.db_name
-    if not db_name:
-        # Use filename for sqlite, or database part for others
-        if cs.startswith("sqlite:///"):
-            db_name = cs.split("/")[-1].replace(".db", "").replace(".sqlite", "") or "local"
-        else:
-            db_name = cs.split("/")[-1].split("?")[0] or "database"
-
-    try:
-        schemas = fetch_schema(cs)
-    except Exception as e:
-        return (
-            f"# Neural Memory — DB Index Failed\n\n"
-            f"**Connection string:** `{cs}`\n\n"
-            f"**Error:** {e}"
-        )
-
-    if not schemas:
-        return (
-            f"# Neural Memory — DB Index\n\n"
-            f"**Database:** {db_name}\n\n"
-            "No tables found in the database."
-        )
-
-    with Storage(params.project_root) as storage:
-        stats = index_db_schema(storage, schemas, db_name, source="live_db")
-
-    return (
-        f"# Neural Memory — DB Schema Indexed\n\n"
-        f"**Database:** {db_name}\n"
-        f"**Tables indexed:** {stats['tables_indexed']}\n"
-        f"**Columns indexed:** {stats['columns_indexed']}\n"
-        f"**FK edges created:** {stats['fk_edges']}\n"
-        f"**Total edges:** {stats['edges_created']}\n\n"
-        f"Use `neural_query` to search the schema, e.g. `neural_query` with query = `{db_name}`."
-    )
-
-
-# ── Documentation Fetching Tool ──
-
-class FetchDocsInput(BaseModel):
-    """Input for fetching package documentation."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    package_name: str = Field(
-        default="auto",
-        description="Package name or 'auto' to fetch for all detected imports",
-    )
-    registry: Optional[str] = Field(
-        default=None,
-        description="Registry: 'pypi', 'npm', 'go', 'crates', or None for auto-detect",
-    )
-    project_root: str = Field(default=".", description="Project root directory path")
-
-
-@mcp.tool(
-    name="neural_fetch_docs",
-    annotations={
-        "title": "Neural Memory — Fetch Package Docs",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    }
-)
-async def neural_fetch_docs(params: FetchDocsInput) -> str:
-    """Fetch package documentation from registries (PyPI, npm, Go, crates.io) and cache
-    it in the knowledge graph.
-
-    Use package_name='auto' to discover all external imports in the indexed codebase
-    and fetch their docs in bulk. Or specify a single package name to fetch on demand.
-    Supports auto-detection of registry from package naming conventions, or explicit
-    registry selection.
-    """
-    import neural_memory.docs  # triggers registration of all fetchers
-    from neural_memory.docs.registry import fetch_docs
-    from datetime import datetime, timezone
-    from .models import EdgeType
-    from .storage import Storage
-
-    project_root = params.project_root or "."
-
-    with Storage(project_root) as storage:
-        if params.package_name == "auto":
-            # Find all unresolved IMPORTS edges and extract package names
-            edges = storage.get_all_edges()
-            packages: set[str] = set()
-            for edge in edges:
-                if edge.edge_type == EdgeType.IMPORTS:
-                    if edge.target_id.startswith("__unresolved__"):
-                        pkg = (
-                            edge.target_id
-                            .replace("__unresolved__", "")
-                            .split(".")[0]
-                            .split("/")[0]
-                        )
-                        if pkg:
-                            packages.add(pkg)
-
-            fetched = []
-            failed = []
-            for pkg in sorted(packages):
-                try:
-                    doc = fetch_docs(pkg, params.registry)
-                    if doc:
-                        storage.upsert_package_doc(
-                            doc.package_name, doc.registry,
-                            doc.to_storage_dict(), doc.fetched_at,
-                        )
-                        fetched.append(f"{pkg} ({doc.registry})")
-                    else:
-                        failed.append(pkg)
-                except Exception as e:
-                    failed.append(f"{pkg} (error: {e})")
-
-            lines = ["## Documentation Fetch Results\n"]
-            lines.append(f"**Fetched**: {len(fetched)} packages")
-            if fetched:
-                lines.append("\n".join(f"- {p}" for p in fetched))
-            if failed:
-                lines.append(f"\n**Not found**: {', '.join(failed[:20])}")
-            return "\n".join(lines)
-
-        else:
-            try:
-                doc = fetch_docs(params.package_name, params.registry)
-            except Exception as e:
-                return (
-                    f"Error fetching documentation for `{params.package_name}`: {e}"
-                )
-
-            if not doc:
-                return (
-                    f"No documentation found for `{params.package_name}`. "
-                    f"Try specifying the registry with `registry='pypi'` (or 'npm', 'go', 'crates')."
-                )
-
-            try:
-                storage.upsert_package_doc(
-                    doc.package_name, doc.registry,
-                    doc.to_storage_dict(), doc.fetched_at,
-                )
-            except Exception as e:
-                return (
-                    f"Fetched documentation for `{params.package_name}` but failed to store it: {e}"
-                )
-
-            lines = [
-                f"## {doc.package_name} ({doc.registry})",
-                f"**Version**: {doc.version or 'unknown'}",
-                f"**Summary**: {doc.summary or 'No summary available'}",
-            ]
-            if doc.homepage_url:
-                lines.append(f"**Homepage**: {doc.homepage_url}")
-            if doc.doc_url:
-                lines.append(f"**Docs**: {doc.doc_url}")
-            if doc.description and doc.description != doc.summary:
-                lines.append(f"\n{doc.description[:1000]}")
-            return "\n".join(lines)
-
-
-# ── Healthcheck Tool ──
-
-class PingInput(BaseModel):
-    """Input for healthcheck ping (no fields required)."""
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-
-
-@mcp.tool(
-    name="neural_ping",
-    annotations={
-        "title": "Neural Memory — Ping",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-async def neural_ping(params: PingInput) -> str:
-    """Lightweight healthcheck — confirms the neural memory MCP server is running."""
-    from . import __version__
-    return f"neural-memory v{__version__} — MCP server is running."
-
-
-# ── Session Context Save Tool ──
-
-@mcp.tool(
-    name="neural_save_context",
-    annotations={
-        "title": "Neural Memory — Save Session Context",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-async def neural_save_context(params: SaveContextInput) -> str:
-    """Save a rich session context snapshot for cross-session continuity.
-
-    Writes active tasks/bugs with their code node connections and recent git
-    commits to .neural-memory/session_context.md. This file is automatically
-    loaded at the start of the next session (via the UserPromptSubmit hook).
-
-    Also returns the current compact context snapshot.
-    """
-    from .context import save_session_context, build_context
-
-    saved_path = save_session_context(
-        project_root=params.project_root,
-        token_budget=params.token_budget,
-    )
-    snapshot = build_context(
-        project_root=params.project_root,
-        token_budget=min(params.token_budget, 500),
-    )
-
-    if saved_path:
-        return f"# Session Context Saved\n\nSaved to: `{saved_path}`\n\n---\n\n{snapshot}"
-    return f"# Session Context\n\n(Save failed — index may be uninitialized)\n\n{snapshot}"
 
 
 # ── Task Management Tools ──

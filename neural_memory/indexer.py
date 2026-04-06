@@ -359,6 +359,9 @@ def full_index(config: Optional[NeuralConfig] = None, project_root: str = ".") -
         except Exception:
             pass
 
+        # Populate FTS index for fast text search
+        storage.populate_fts()
+
     return stats
 
 
@@ -504,6 +507,9 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
                     changed_ids.add(node.id)
             update_embeddings(storage, changed_ids)
 
+        # Refresh FTS index
+        storage.populate_fts()
+
         # Update state
         now = datetime.now(timezone.utc).isoformat()
         state.last_incremental_update = now
@@ -513,5 +519,77 @@ def incremental_update(config: Optional[NeuralConfig] = None, project_root: str 
         state.total_edges = db_stats["total_edges"]
         state.total_files = db_stats["total_files"]
         storage.save_index_state(state)
+
+    return stats
+
+
+def micro_update(file_path: str, project_root: str = ".") -> dict:
+    """Re-parse a single file and update its nodes/edges in the graph.
+
+    This is a fast (<200ms) AST-only update that skips embeddings, importance
+    recalculation, LSP enrichment, and overview regeneration. It is used by
+    neural_inspect to ensure the target file's data is current before returning.
+
+    Returns stats dict with keys: nodes_updated, edges_updated, error (or None).
+    """
+    config = load_config(project_root)
+    root = Path(config.project_root).resolve()
+    full_path = root / file_path
+    stats: dict = {"nodes_updated": 0, "edges_updated": 0, "error": None}
+
+    if not full_path.exists():
+        stats["error"] = f"File not found: {file_path}"
+        return stats
+
+    redactor = Redactor(config.redaction)
+
+    try:
+        with Storage(project_root) as storage:
+            # Load existing nodes for cross-file edge resolution
+            all_existing_nodes = {n.id: n for n in storage.get_all_nodes()}
+
+            # Remove stale data for this file
+            storage.delete_edges_by_file(file_path)
+            storage.delete_nodes_by_file(file_path)
+
+            # Re-parse
+            source = full_path.read_text(encoding="utf-8", errors="replace")
+            parser = _get_parser(file_path)
+            if parser:
+                nodes, edges = parser.parse_file(str(file_path), source=source)
+            else:
+                nodes, edges = _py_parse_file(str(file_path), source=source)
+
+            # Update node registry and resolve edges
+            for node in nodes:
+                all_existing_nodes[node.id] = node
+            edges = resolve_edges(all_existing_nodes, edges)
+
+            # Redact sensitive content
+            for node in nodes:
+                if node.raw_code:
+                    rc, rs, had = redactor.redact_node_content(node.raw_code, node.summary_short)
+                    if had:
+                        node.raw_code = rc
+                        node.summary_short = rs
+                        node.has_redacted_content = True
+
+            # Store
+            storage.batch_upsert_nodes(nodes)
+            storage.batch_upsert_edges(edges)
+
+            stats["nodes_updated"] = len(nodes)
+            stats["edges_updated"] = len(edges)
+
+            # Targeted FTS refresh — cheaper than full rebuild, keeps search accurate
+            storage.update_fts_for_nodes([n.id for n in nodes])
+
+            # Update file hash + last_verified
+            now = datetime.now(timezone.utc).isoformat()
+            fh = _file_hash(file_path, project_root)
+            storage.save_file_hash(file_path, fh, now)
+
+    except Exception as e:
+        stats["error"] = str(e)
 
     return stats

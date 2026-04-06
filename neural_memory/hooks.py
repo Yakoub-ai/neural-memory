@@ -25,16 +25,31 @@ import sys
 def prompt_context() -> None:
     """UserPromptSubmit hook — inject compact neural memory context.
 
-    Called by Claude Code before each user prompt. Reads the prompt text
-    from the CLAUDE_USER_PROMPT environment variable (set by the harness),
-    then emits a token-budgeted context snapshot to stdout.
+    Strategy:
+    - Session start (empty prompt / first call): inject full context + saved session context.
+    - Subsequent prompts: inject nothing. The full context at session start is enough.
+      Claude already has the codebase in its active context window after the first message.
 
-    If the neural memory index doesn't exist yet, emits a single-line hint
-    and exits — never crashes.
+    This fixes the "circular token savings" problem where every prompt injected 500 tokens
+    of redundant context that Claude already had from reading the files.
     """
     query_hint = os.environ.get("CLAUDE_USER_PROMPT", "").strip()
     project_root = os.environ.get("CLAUDE_PROJECT_ROOT", ".").strip() or "."
 
+    # Per-process flag: have we already done the session-start injection?
+    _first_call_key = f"_neural_first_call_{os.getpid()}"
+    _start_time_key = f"_neural_session_start_{os.getpid()}"
+    is_first_call = not os.environ.get(_first_call_key)
+    if is_first_call:
+        from datetime import datetime, timezone
+        os.environ[_first_call_key] = "1"
+        os.environ[_start_time_key] = datetime.now(timezone.utc).isoformat()
+
+    if not is_first_call:
+        # Subsequent prompts: stay silent. Claude has context from session start.
+        return
+
+    # Session start: inject full context
     try:
         from .context import build_context
         output = build_context(
@@ -42,46 +57,66 @@ def prompt_context() -> None:
             query_hint=query_hint or None,
             token_budget=500,
         )
-        # Only emit if there's meaningful content (index exists)
         if "uninitialized" not in output and "unavailable" not in output:
             print(output)
         elif "uninitialized" in output:
             print("<!-- neural-memory: not indexed. Run /neural-index to build the knowledge graph. -->")
     except Exception:
-        # Silent failure — never break the user's workflow
         pass
 
-    # Inject saved session context once per process lifetime (session start only)
-    if not query_hint:
-        try:
-            import os as _os
-            from pathlib import Path
-            from .config import get_memory_dir
-            # Use a per-process flag to inject only on the first empty-prompt call
-            _flag_key = f"_neural_ctx_injected_{_os.getpid()}"
-            if not _os.environ.get(_flag_key):
-                _os.environ[_flag_key] = "1"
-                ctx_file = get_memory_dir(project_root) / "session_context.md"
-                if ctx_file.exists():
-                    saved = ctx_file.read_text(encoding="utf-8").strip()
-                    if saved:
-                        print("<!-- neural-memory: saved session context -->")
-                        print(saved)
-                        print("<!-- /neural-memory: saved session context -->")
-        except Exception:
-            pass
+    # Inject saved session context + recent session history on first call
+    try:
+        from pathlib import Path
+        from .config import get_memory_dir
+        ctx_file = get_memory_dir(project_root) / "session_context.md"
+        if ctx_file.exists():
+            saved = ctx_file.read_text(encoding="utf-8").strip()
+            if saved:
+                print("<!-- neural-memory: saved session context -->")
+                print(saved)
+                print("<!-- /neural-memory: saved session context -->")
+    except Exception:
+        pass
+
+    # Inject recent session history (last 3 sessions) for cross-session memory
+    try:
+        from .storage import Storage
+        with Storage(project_root) as storage:
+            recent = storage.get_recent_sessions(limit=3)
+        if recent:
+            lines = ["<!-- neural-memory: recent session history -->"]
+            for s in recent:
+                date = (s["started_at"] or "")[:10]
+                summary = s["summary"] or "(no summary)"
+                files = s.get("files_touched", [])
+                files_str = f" | files: {', '.join(files[:4])}" if files else ""
+                lines.append(f"Session {date}: {summary}{files_str}")
+            lines.append("<!-- /neural-memory: recent session history -->")
+            print("\n".join(lines))
+    except Exception:
+        pass
 
 
 def session_end() -> None:
-    """Stop hook — archive completed items and optionally auto-update.
+    """Stop hook — archive completed items, write session log, and auto-update.
 
-    Called by Claude Code when the session ends. Performs two tasks:
+    Called by Claude Code when the session ends. Performs three tasks:
     1. Archives tasks with status=done and bugs with status=fixed
-    2. Triggers incremental update if index is stale and < 10 files changed
+    2. Writes a session summary to the session_log table for cross-session memory
+    3. Triggers incremental update if the index is stale (always, not just small diffs)
 
-    Both operations are best-effort and silent on failure.
+    All operations are best-effort and silent on failure.
     """
+    import subprocess
+    import uuid
+    from datetime import datetime, timezone
+
     project_root = os.environ.get("CLAUDE_PROJECT_ROOT", ".").strip() or "."
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Recover session start time recorded by prompt_context() on first call
+    _start_time_key = f"_neural_session_start_{os.getpid()}"
+    started_at = os.environ.get(_start_time_key) or now
 
     # Save session context snapshot for cross-session continuity
     try:
@@ -90,21 +125,54 @@ def session_end() -> None:
     except Exception:
         pass
 
-    # Archive completed items
+    # Determine files touched this session via git (best-effort)
+    files_touched: list[str] = []
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+            capture_output=True, text=True, cwd=project_root, timeout=5,
+        )
+        if result.returncode == 0:
+            files_touched = [f.strip() for f in result.stdout.strip().splitlines() if f.strip()][:20]
+    except Exception:
+        pass
+
+    # Archive completed items, collect recent insights, write session log — one connection
     try:
         from .storage import Storage
         with Storage(project_root) as storage:
             count = storage.archive_completed()
-        if count > 0 and "--debug" in sys.argv:
-            print(f"neural-memory: archived {count} completed item(s)", file=sys.stderr)
+            if count > 0 and "--debug" in sys.argv:
+                print(f"neural-memory: archived {count} completed item(s)", file=sys.stderr)
+
+            insights_added: list[str] = []
+            summary = ""
+            try:
+                insights = storage.get_insights()
+                recent_insights = [n.name for n in insights[:3]]
+                if recent_insights:
+                    insights_added = recent_insights
+                    summary = f"Insights: {'; '.join(recent_insights[:2])}"
+            except Exception:
+                pass
+
+            storage.save_session(
+                session_id=str(uuid.uuid4())[:8],
+                started_at=started_at,
+                ended_at=now,
+                summary=summary,
+                files_touched=files_touched,
+                insights_added=insights_added,
+                data={},
+            )
     except Exception:
         pass
 
-    # Auto-update if stale and small change set
+    # Auto-update whenever stale — session end is the right time, user isn't waiting
     try:
         from .agent import check_staleness
         report = check_staleness(project_root)
-        if report.status == "stale" and 0 < report.commits_behind <= 3 and len(report.stale_files) <= 10:
+        if report.status == "stale":
             from .indexer import incremental_update
             incremental_update(project_root=project_root)
     except Exception:

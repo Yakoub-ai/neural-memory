@@ -20,7 +20,7 @@ If the index appears stale or uninitialized in the context header, suggest the a
 - Uninitialized: run `/neural-index`
 - Stale: run `/neural-update`
 
-Use `neural_context` (MCP tool) for on-demand context snapshots, and `neural_query`/`neural_inspect` for deep exploration.
+Use `neural_query` to search the graph and `neural_inspect` for deep-diving into a specific node.
 """
 
 # Claude Code hooks block to inject into settings.json.

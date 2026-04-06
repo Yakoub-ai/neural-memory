@@ -180,6 +180,114 @@ def trace_call_chain(
     return chains
 
 
+def get_impact_radius(
+    storage: Storage,
+    node_id: str,
+    max_depth: int = 3,
+) -> dict:
+    """Compute the impact radius of changing a node — "what else might break?"
+
+    Walks incoming CALLS and INHERITS edges transitively (who depends on this?).
+    Returns results grouped by file for actionable output.
+
+    Returns:
+        {
+            "center": NeuralNode,
+            "affected_nodes": list[NeuralNode],          # all transitive dependents
+            "affected_by_file": dict[str, list[str]],    # file_path -> [node names]
+            "direct_callers": list[NeuralNode],
+            "total_affected": int,
+        }
+    """
+    center = storage.get_node(node_id)
+    if not center:
+        return {"error": f"Node '{node_id}' not found"}
+
+    _IMPACT_EDGE_TYPES = {EdgeType.CALLS, EdgeType.INHERITS, EdgeType.IMPLEMENTS}
+
+    visited: set[str] = set()
+    affected: list[NeuralNode] = []
+    direct_callers: list[NeuralNode] = []
+
+    def _walk(current_id: str, depth: int) -> None:
+        if depth > max_depth or current_id in visited:
+            return
+        visited.add(current_id)
+
+        for edge in storage.get_edges_to(current_id):
+            if edge.edge_type not in _IMPACT_EDGE_TYPES:
+                continue
+            caller = storage.get_node(edge.source_id)
+            if not caller or caller.id in visited:
+                continue
+
+            if depth == 0:
+                direct_callers.append(caller)
+
+            # Skip project/directory overview nodes — not meaningful for impact analysis
+            if caller.node_type not in {NodeType.PROJECT_OVERVIEW, NodeType.DIRECTORY_OVERVIEW}:
+                affected.append(caller)
+
+            _walk(caller.id, depth + 1)
+
+    _walk(node_id, 0)
+
+    # Group by file
+    by_file: dict[str, list[str]] = {}
+    for node in affected:
+        by_file.setdefault(node.file_path, []).append(node.name)
+
+    return {
+        "center": center,
+        "affected_nodes": affected,
+        "affected_by_file": by_file,
+        "direct_callers": direct_callers,
+        "total_affected": len(affected),
+    }
+
+
+def format_impact_report(impact: dict) -> str:
+    """Format an impact radius result for display."""
+    if "error" in impact:
+        return impact["error"]
+
+    center = impact["center"]
+    total = impact["total_affected"]
+    by_file = impact["affected_by_file"]
+    direct = impact["direct_callers"]
+
+    lines = [
+        "# Impact Analysis",
+        "",
+        f"**Changing `{center.name}`** ({center.node_type.value}) in `{center.file_path}`",
+        "",
+    ]
+
+    if total == 0:
+        lines.append("No dependents found — this node appears to be a leaf (nothing calls it).")
+        return "\n".join(lines)
+
+    lines.append(f"**{total} node(s) across {len(by_file)} file(s) may be affected:**")
+    lines.append("")
+
+    if direct:
+        lines.append(f"### Direct callers ({len(direct)})")
+        for n in direct[:10]:
+            lines.append(f"  - `{n.name}` ({n.node_type.value}) in `{n.file_path}:{n.line_start}`")
+        lines.append("")
+
+    lines.append("### Affected files")
+    for fp, names in sorted(by_file.items(), key=lambda x: -len(x[1])):
+        names_str = ", ".join(f"`{n}`" for n in names[:5])
+        if len(names) > 5:
+            names_str += f" (+{len(names) - 5} more)"
+        lines.append(f"  - **{fp}**: {names_str}")
+
+    lines.append("")
+    lines.append("Run `neural_inspect` on any node above for full call chain details.")
+    return "\n".join(lines)
+
+
 def format_node_summary(node: NeuralNode, level: str = "short") -> str:
     """Format a node for display."""
     icon = {

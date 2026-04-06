@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from .config import get_memory_dir, DB_FILE
 from .models import NeuralNode, NeuralEdge, IndexState, EmbeddingMeta, NodeType, EdgeType
@@ -72,7 +77,16 @@ class Storage:
             CREATE TABLE IF NOT EXISTS file_hashes (
                 file_path TEXT PRIMARY KEY,
                 content_hash TEXT NOT NULL,
-                last_indexed TEXT
+                last_indexed TEXT,
+                last_verified TEXT
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+                node_id UNINDEXED,
+                name,
+                summary_short,
+                docstring,
+                tokenize='unicode61'
             );
 
             CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
@@ -111,6 +125,18 @@ class Storage:
             );
 
             CREATE INDEX IF NOT EXISTS idx_pkgdocs_registry ON package_docs(registry);
+
+            CREATE TABLE IF NOT EXISTS session_log (
+                session_id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                summary TEXT DEFAULT '',
+                files_touched TEXT DEFAULT '[]',
+                insights_added TEXT DEFAULT '[]',
+                data JSON DEFAULT '{}'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_session_log_started ON session_log(started_at);
 
         """)
         self._migrate_schema()
@@ -163,6 +189,46 @@ class Storage:
                     PRIMARY KEY (package_name, registry)
                 );
                 CREATE INDEX IF NOT EXISTS idx_pkgdocs_registry ON package_docs(registry);
+            """)
+            self.conn.commit()
+        except Exception:
+            pass
+
+        # v5: add last_verified column to file_hashes for freshness cache
+        try:
+            self.conn.execute("ALTER TABLE file_hashes ADD COLUMN last_verified TEXT")
+            self.conn.commit()
+        except Exception:
+            pass
+
+        # v5: add FTS5 search table for nodes
+        try:
+            self.conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+                    node_id UNINDEXED,
+                    name,
+                    summary_short,
+                    docstring,
+                    tokenize='unicode61'
+                )
+            """)
+            self.conn.commit()
+        except Exception:
+            pass
+
+        # v6: add session_log table for cross-session memory
+        try:
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS session_log (
+                    session_id TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    summary TEXT DEFAULT '',
+                    files_touched TEXT DEFAULT '[]',
+                    insights_added TEXT DEFAULT '[]',
+                    data JSON DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_session_log_started ON session_log(started_at);
             """)
             self.conn.commit()
         except Exception:
@@ -351,8 +417,145 @@ class Storage:
         ).fetchall()
         return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
 
+    def check_file_freshness(
+        self,
+        file_paths: list[str],
+        project_root: str,
+        skip_if_verified_within_seconds: int = 300,
+    ) -> dict[str, str]:
+        """Check if indexed files are still fresh by comparing disk hash vs stored hash.
+
+        Returns dict mapping file_path -> "fresh" | "stale" | "deleted" | "new".
+        Files verified within skip_if_verified_within_seconds are assumed fresh without re-hashing.
+        Cost: ~1ms per uncached file (SHA-256 of file contents).
+        """
+        if not file_paths:
+            return {}
+
+        now = datetime.now(timezone.utc)
+        root = Path(project_root).resolve()
+        result: dict[str, str] = {}
+
+        # Load stored hashes + last_verified for all requested files in one query
+        placeholders = ",".join("?" * len(file_paths))
+        rows = self.conn.execute(
+            f"SELECT file_path, content_hash, last_verified FROM file_hashes WHERE file_path IN ({placeholders})",
+            file_paths,
+        ).fetchall()
+        stored = {r["file_path"]: (r["content_hash"], r["last_verified"]) for r in rows}
+
+        to_verify: list[tuple[str, str, Path]] = []
+
+        for fp in file_paths:
+            if fp not in stored:
+                result[fp] = "new"
+                continue
+            stored_hash, last_verified = stored[fp]
+            full_path = root / fp
+            if not full_path.exists():
+                result[fp] = "deleted"
+                continue
+            # Freshness cache: skip re-hashing if verified recently
+            if last_verified:
+                try:
+                    lv_dt = datetime.fromisoformat(last_verified)
+                    if lv_dt.tzinfo is None:
+                        lv_dt = lv_dt.replace(tzinfo=timezone.utc)
+                    if (now - lv_dt).total_seconds() < skip_if_verified_within_seconds:
+                        result[fp] = "fresh"
+                        continue
+                except Exception:
+                    pass
+            to_verify.append((fp, stored_hash, full_path))
+
+        # Re-hash files that need verification
+        fresh_now = now.isoformat()
+        verified_fps: list[str] = []
+        for fp, stored_hash, full_path in to_verify:
+            try:
+                current_hash = hashlib.sha256(full_path.read_bytes()).hexdigest()[:16]
+                if current_hash == stored_hash:
+                    result[fp] = "fresh"
+                    verified_fps.append(fp)
+                else:
+                    result[fp] = "stale"
+            except Exception:
+                result[fp] = "stale"
+
+        # Batch-update last_verified for confirmed-fresh files
+        if verified_fps:
+            self.conn.executemany(
+                "UPDATE file_hashes SET last_verified = ? WHERE file_path = ?",
+                [(fresh_now, fp) for fp in verified_fps],
+            )
+            self.conn.commit()
+
+        return result
+
+    def populate_fts(self) -> None:
+        """Rebuild the FTS5 search index from current nodes. Call after index/update."""
+        try:
+            self.conn.execute("DELETE FROM nodes_fts")
+            self.conn.execute("""
+                INSERT INTO nodes_fts(node_id, name, summary_short, docstring)
+                SELECT id,
+                       name,
+                       COALESCE(json_extract(data, '$.summary_short'), ''),
+                       COALESCE(json_extract(data, '$.docstring'), '')
+                FROM nodes
+            """)
+            self.conn.commit()
+        except Exception as e:
+            logger.warning("populate_fts failed: %s", e)
+
+    def update_fts_for_nodes(self, node_ids: list[str]) -> None:
+        """Incrementally update FTS5 entries for the given node IDs only.
+
+        Much cheaper than a full populate_fts() rebuild — used by micro_update()
+        to keep search accurate after single-file re-parses.
+        """
+        if not node_ids:
+            return
+        try:
+            placeholders = ",".join("?" * len(node_ids))
+            self.conn.execute(
+                f"DELETE FROM nodes_fts WHERE node_id IN ({placeholders})", node_ids
+            )
+            self.conn.execute(
+                f"""INSERT INTO nodes_fts(node_id, name, summary_short, docstring)
+                    SELECT id,
+                           name,
+                           COALESCE(json_extract(data, '$.summary_short'), ''),
+                           COALESCE(json_extract(data, '$.docstring'), '')
+                    FROM nodes WHERE id IN ({placeholders})""",
+                node_ids,
+            )
+            self.conn.commit()
+        except Exception as e:
+            logger.warning("update_fts_for_nodes failed: %s", e)
+
     def search_nodes(self, query: str, limit: int = 20) -> list[NeuralNode]:
-        """Search nodes by name or summary content."""
+        """Search nodes by name or summary — uses FTS5 BM25 ranking when available."""
+        # Attempt FTS5 search (BM25 ranking, much better than LIKE)
+        try:
+            words = [w.strip() for w in query.split() if w.strip()]
+            if words:
+                # Prefix-match each word for typo-tolerance on partials
+                fts_query = " ".join(f'"{w}"*' for w in words)
+                rows = self.conn.execute(
+                    """SELECT n.data FROM nodes_fts
+                       JOIN nodes n ON n.id = nodes_fts.node_id
+                       WHERE nodes_fts MATCH ?
+                       ORDER BY rank, n.importance DESC
+                       LIMIT ?""",
+                    (fts_query, limit),
+                ).fetchall()
+                if rows:
+                    return [NeuralNode.from_dict(json.loads(r["data"])) for r in rows]
+        except Exception as e:
+            logger.warning("FTS5 search failed, falling back to LIKE: %s", e)
+
+        # Fallback: LIKE search on name + JSON blob
         pattern = f"%{query}%"
         rows = self.conn.execute(
             """SELECT data FROM nodes
@@ -466,12 +669,13 @@ class Storage:
 
     def save_file_hash(self, file_path: str, content_hash: str, timestamp: str) -> None:
         self.conn.execute(
-            """INSERT INTO file_hashes (file_path, content_hash, last_indexed)
-               VALUES (?, ?, ?)
+            """INSERT INTO file_hashes (file_path, content_hash, last_indexed, last_verified)
+               VALUES (?, ?, ?, ?)
                ON CONFLICT(file_path) DO UPDATE SET
                    content_hash=excluded.content_hash,
-                   last_indexed=excluded.last_indexed""",
-            (file_path, content_hash, timestamp)
+                   last_indexed=excluded.last_indexed,
+                   last_verified=excluded.last_verified""",
+            (file_path, content_hash, timestamp, timestamp)
         )
         self.conn.commit()
 
@@ -637,13 +841,16 @@ class Storage:
         if not entries:
             return
         with self.transaction():
+            # Expand entries to include last_verified = timestamp (just indexed = just verified)
+            expanded = [(fp, ch, ts, ts) for fp, ch, ts in entries]
             self.conn.executemany(
-                """INSERT INTO file_hashes (file_path, content_hash, last_indexed)
-                   VALUES (?, ?, ?)
+                """INSERT INTO file_hashes (file_path, content_hash, last_indexed, last_verified)
+                   VALUES (?, ?, ?, ?)
                    ON CONFLICT(file_path) DO UPDATE SET
                        content_hash=excluded.content_hash,
-                       last_indexed=excluded.last_indexed""",
-                entries
+                       last_indexed=excluded.last_indexed,
+                       last_verified=excluded.last_verified""",
+                expanded
             )
 
     def get_all_edges_by_node(self) -> dict[str, dict[str, list[NeuralEdge]]]:
@@ -681,6 +888,55 @@ class Storage:
             ) eout ON eout.source_id = n.id
         """).fetchall()
         return {r["id"]: (r["in_deg"], r["out_deg"]) for r in rows}
+
+    # ── Session log ──
+
+    def save_session(
+        self,
+        session_id: str,
+        started_at: str,
+        ended_at: Optional[str],
+        summary: str,
+        files_touched: list[str],
+        insights_added: list[str],
+        data: dict,
+    ) -> None:
+        """Write or update a session log entry."""
+        self.conn.execute(
+            """INSERT INTO session_log
+                   (session_id, started_at, ended_at, summary, files_touched, insights_added, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(session_id) DO UPDATE SET
+                   ended_at=excluded.ended_at,
+                   summary=excluded.summary,
+                   files_touched=excluded.files_touched,
+                   insights_added=excluded.insights_added,
+                   data=excluded.data""",
+            (
+                session_id, started_at, ended_at, summary,
+                json.dumps(files_touched), json.dumps(insights_added),
+                json.dumps(data),
+            ),
+        )
+        self.conn.commit()
+
+    def get_recent_sessions(self, limit: int = 3) -> list[dict]:
+        """Return the N most recent session log entries, newest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM session_log ORDER BY started_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                "session_id": r["session_id"],
+                "started_at": r["started_at"],
+                "ended_at": r["ended_at"],
+                "summary": r["summary"],
+                "files_touched": json.loads(r["files_touched"] or "[]"),
+                "insights_added": json.loads(r["insights_added"] or "[]"),
+                "data": json.loads(r["data"] or "{}"),
+            })
+        return result
 
     # ── Stats ──
 
